@@ -1,0 +1,26 @@
+# Virtual Environment & Python Cache
+.venv/
+app/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+app/.pytest_cache/
+
+# Environment Variables & Secrets (Zero Secret Leakage)
+.env
+app/.env
+*service-account*.json
+*credentials*.json
+
+# SQLite Databases, WAL/SHM & Backups
+*.db
+*.db-shm
+*.db-wal
+app/data/
+app/backups/
+backups/
+
+# Runtime Logs
+*.log
+app/server.log

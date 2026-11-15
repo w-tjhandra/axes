@@ -24,10 +24,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
-    from . import db, rules
+    from . import db
 except ImportError:  # pragma: no cover
     import db  # type: ignore[no-redef]
-    import rules  # type: ignore[no-redef]
 
 MAX_DOCX_BYTES = 10 * 1024 * 1024
 MAX_DOCX_UNCOMPRESSED = 100 * 1024 * 1024

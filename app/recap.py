@@ -9,17 +9,15 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import sqlite3
 from typing import Any
 
 from fastapi.responses import Response
 
 try:
-    from . import db, rules
+    from . import db
 except ImportError:  # pragma: no cover
     import db  # type: ignore[no-redef]
-    import rules  # type: ignore[no-redef]
 
 FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
 
@@ -338,9 +336,6 @@ def compute_recap_summary(
                     "school_kode": school["kode"],
                     "scheme_kode": school["scheme_kode"],
                     "scheme_nama": school["scheme_nama"] or school["scheme_kode"],
-                    "school_id": school["id"],
-                    "school_kode": school["kode"],
-                    "school_nama": school["nama"],
                     "nomor": p["nomor"],
                     "nama": p["nama"],
                     "kelas": p["kelas"] or "",

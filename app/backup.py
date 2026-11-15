@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .db import resolve_db_path, utcnow
+    from .db import resolve_db_path
 except ImportError:  # pragma: no cover
-    from db import resolve_db_path, utcnow  # type: ignore[no-redef]
+    from db import resolve_db_path  # type: ignore[no-redef]
 
 DEFAULT_RETENTION_DAYS = 30
 

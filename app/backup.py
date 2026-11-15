@@ -11,6 +11,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -76,7 +77,8 @@ def create_backup(
     out_dir = Path(target_dir).expanduser().resolve() if target_dir else backup_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"ukk_{_timestamp()}.sqlite3"
+    stamp = _timestamp()
+    filename = f"ukk_{stamp}.sqlite3"
     target = out_dir / filename
 
     src = sqlite3.connect(src_path, timeout=10.0)
@@ -101,6 +103,31 @@ def create_backup(
     except OSError:
         pass
 
+    documents_dir = Path(
+        os.environ.get("CERTIFICATE_DIR", str(src_path.parent / "certificates"))
+    ).expanduser().resolve()
+    documents_filename = None
+    documents_size = 0
+    documents = sorted(
+        path for path in documents_dir.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.name.startswith(("template-", "certificate-"))
+    ) if documents_dir.is_dir() else []
+    if documents:
+        documents_target = out_dir / f"ukk_{stamp}.documents.zip"
+        with zipfile.ZipFile(documents_target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in documents:
+                if path.resolve().parent != documents_dir:
+                    continue
+                archive.write(path, arcname=path.name)
+        try:
+            os.chmod(documents_target, 0o600)
+        except OSError:
+            pass
+        if key:
+            documents_target = _encrypt_backup_file(documents_target, out_dir, key)
+        documents_filename = documents_target.name
+        documents_size = documents_target.stat().st_size
+
     purge_old_backups(out_dir, retention_days)
     stat = target.stat()
     return {
@@ -111,6 +138,8 @@ def create_backup(
         ),
         "encrypted": encrypted,
         "retention_days": retention_days,
+        "documents_filename": documents_filename,
+        "documents_size_bytes": documents_size,
     }
 
 
@@ -119,7 +148,9 @@ def purge_old_backups(out_dir: Path, retention_days: int) -> int:
         return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     removed = 0
-    for item in out_dir.glob("ukk_*.sqlite3*"):
+    for item in out_dir.glob("ukk_*"):
+        if ".sqlite3" not in item.name and ".documents.zip" not in item.name:
+            continue
         if not item.is_file():
             continue
         mtime = datetime.fromtimestamp(item.stat().st_mtime, timezone.utc)
@@ -134,7 +165,12 @@ def list_backups(target_dir: str | os.PathLike[str] | None = None) -> list[dict[
     if not out_dir.exists():
         return []
     items: list[dict[str, Any]] = []
-    for item in sorted(out_dir.glob("ukk_*.sqlite3*"), key=lambda p: p.stat().st_mtime, reverse=True):
+    candidates = [
+        item
+        for item in out_dir.glob("ukk_*")
+        if item.is_file() and (".sqlite3" in item.name or ".documents.zip" in item.name)
+    ]
+    for item in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
         if not item.is_file():
             continue
         stat = item.stat()
@@ -146,6 +182,7 @@ def list_backups(target_dir: str | os.PathLike[str] | None = None) -> list[dict[
                     "%Y-%m-%dT%H:%M:%SZ"
                 ),
                 "encrypted": item.name.endswith(".enc"),
+                "backup_type": "documents" if ".documents.zip" in item.name else "database",
             }
         )
     return items

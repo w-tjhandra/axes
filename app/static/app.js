@@ -19,6 +19,13 @@ const state = {
   offline: !navigator.onLine,
   configUnits: [],
   instrument: null,
+  examDashboardFilters: {
+    exam_id: localStorage.getItem('ukk-dashboard-exam') || '',
+    school_id: '',
+    scheme_kode: '',
+  },
+  enrollmentPage: 0,
+  enrollmentFilters: { examId: '', school_id: '', scheme_kode: '', group_label: '', status: 'enrolled' },
 };
 
 const memoryOutbox = new Map();
@@ -294,8 +301,14 @@ function showAppShell() {
   document.querySelector('#login-view').classList.add('hidden');
   document.querySelector('#app-shell').classList.remove('hidden');
   const line = document.querySelector('#sidebar-user');
-  if (state.user && line) {
-    line.innerHTML = `<strong>${esc(state.user.username)}</strong><span class="muted">Asesor Kompetensi</span>`;
+  const avatar = document.querySelector('.user-avatar');
+  if (state.user) {
+    if (line) {
+      line.innerHTML = `<strong>${esc(state.user.username)}</strong><span class="muted">Asesor Kompetensi</span>`;
+    }
+    if (avatar && state.user.username) {
+      avatar.textContent = state.user.username.slice(0, 2).toUpperCase();
+    }
   }
 }
 
@@ -587,7 +600,11 @@ async function route() {
   const root = parts[0] || 'dashboard';
   setNav(root === 'assessment' ? 'schools' : root);
   try {
-    if (root === 'dashboard') await renderDashboard();
+    if (root === 'dashboard') await renderExamDashboard();
+    else if (root === 'exams' && parts.length === 1) await renderExams();
+    else if (root === 'exams') await renderExamDetail(Number(parts[1]));
+    else if (root === 'archives' && parts.length === 1) await renderArchives();
+    else if (root === 'archives') await renderExamDetail(Number(parts[1]), true);
     else if (root === 'schemes') await renderSchemes();
     else if (root === 'recap') await renderRecap();
     else if (root === 'schools' && parts.length === 1) await renderSchools();
@@ -649,109 +666,220 @@ async function renderDashboard() {
   const pBelum = Math.round(((outcomes.belum_kompeten || 0) / totalOut) * 100);
 
   const activeSchemeObj = state.schemes.find((s) => s.kode === state.activeScheme);
-  const subtitleText = activeSchemeObj
-    ? `Skema Aktif: ${activeSchemeObj.nama} (${activeSchemeObj.units_count} unit, ${activeSchemeObj.indicators_count} indikator, ${activeSchemeObj.sub_competencies_count} sub kompetensi)`
-    : `${state.schemes.length} skema kompetensi aktif · Pengganti Google Form & Rekap Manual Google Sheet.`;
+  const totalSchools = state.schools.length;
+  const lockedPct = totals.participants ? Math.round((totals.locked / totals.participants) * 100) : 0;
+  const exportScheme = state.activeScheme !== 'ALL' ? state.activeScheme : (state.schemes[0]?.kode || 'JNT-SMK');
 
   document.querySelector('#view').innerHTML = `
-    <div class="page-head">
-      <div>
-        <h2>Ringkasan Penilaian &amp; Kompetensi</h2>
-        <p class="sub muted">${esc(subtitleText)}</p>
+    <!-- Hero Banner Greeting & Quick Summary -->
+    <div class="dashboard-hero">
+      <div class="dashboard-hero-content">
+        <span class="badge" style="background:rgba(255,255,255,0.2);color:#fff;border:0;margin-bottom:8px">
+          ${activeSchemeObj ? esc(activeSchemeObj.kode) : 'Semua Skema Aktif'}
+        </span>
+        <h2>Selamat Datang di AeroAssess Portal</h2>
+        <p>
+          ${activeSchemeObj 
+            ? `Skema: <strong>${esc(activeSchemeObj.nama)}</strong> &bull; ${activeSchemeObj.units_count} Unit &bull; ${activeSchemeObj.indicators_count} Indikator (Ambang ${activeSchemeObj.pass_threshold}%)`
+            : `Mengelola <strong>${state.schemes.length} skema sertifikasi</strong>, ${totalSchools} sekolah/TUK, dan ${totals.participants} total peserta kompetensi.`
+          }
+        </p>
       </div>
-      <div class="head-actions">
-        <a class="btn" href="#/schemes">Kelola Skema (${state.schemes.length})</a>
-        <a class="btn" href="#/recap">Rekap Otomatis &amp; Sheet</a>
-        <a class="btn primary" href="#/schools">Kelola Sekolah</a>
+      <div class="dashboard-hero-actions">
+        <a class="btn primary" href="#/schools" style="background:#fff;color:var(--primary);border-color:#fff">+ Nilai Peserta</a>
+        <a class="btn ghost" href="#/recap" style="color:#fff;border-color:rgba(255,255,255,0.4)">Buka Rekap Sheet &rarr;</a>
       </div>
     </div>
 
+    <!-- Quick Action Shortcut Pills -->
+    <div class="quick-actions-bar">
+      <a class="quick-action-card" href="#/schools">
+        <div class="quick-action-icon" style="background:var(--primary-soft);color:var(--primary)">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17h14M4.5 17V7.5L10 4l5.5 3.5V17M8 17v-4h4v4"/></svg>
+        </div>
+        <div>
+          <div class="quick-action-title">Kelola Sekolah &amp; TUK</div>
+          <div class="quick-action-desc">${totalSchools} institusi terdaftar</div>
+        </div>
+      </a>
+
+      <a class="quick-action-card" href="#/schemes">
+        <div class="quick-action-icon" style="background:var(--teal-soft);color:var(--teal)">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5L2.5 6.5 10 10.5l7.5-4-7.5-4zM2.5 10l7.5 4 7.5-4M2.5 13.5l7.5 4 7.5-4"/></svg>
+        </div>
+        <div>
+          <div class="quick-action-title">Skema &amp; Standar</div>
+          <div class="quick-action-desc">${state.schemes.length} standar kompetensi</div>
+        </div>
+      </a>
+
+      <a class="quick-action-card" href="/api/schemes/${encodeURIComponent(exportScheme)}/export?format=xlsx" download>
+        <div class="quick-action-icon" style="background:var(--success-soft);color:var(--success)">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.5v1.8a1.7 1.7 0 001.7 1.7h8.6a1.7 1.7 0 001.7-1.7V14.5M10 3.5v9M6.5 9.5L10 13l3.5-3.5"/></svg>
+        </div>
+        <div>
+          <div class="quick-action-title">Ekspor Rekap Excel</div>
+          <div class="quick-action-desc">Format .xlsx multi-sheet</div>
+        </div>
+      </a>
+
+      <a class="quick-action-card" href="#/config">
+        <div class="quick-action-icon" style="background:var(--purple-soft);color:var(--purple)">
+          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="3"/><path d="M16.5 10a6.5 6.5 0 01-1.3 3.9l1.4 1.4-1.4 1.4-1.4-1.4A6.5 6.5 0 0110 16.5v2h-2v-2a6.5 6.5 0 01-3.9-1.3l-1.4 1.4-1.4-1.4 1.4-1.4A6.5 6.5 0 012.5 10h-2V8h2a6.5 6.5 0 011.3-3.9l-1.4-1.4 1.4-1.4 1.4 1.4A6.5 6.5 0 018 2.5v-2h2v2a6.5 6.5 0 013.9 1.3l1.4-1.4 1.4 1.4-1.4 1.4A6.5 6.5 0 0116.5 8h2v2h-2z"/></svg>
+        </div>
+        <div>
+          <div class="quick-action-title">Instrumen &amp; Rubrik</div>
+          <div class="quick-action-desc">Pengaturan indikator uji</div>
+        </div>
+      </a>
+    </div>
+
+    <!-- Stat Grid -->
     <div class="stat-grid">
       <div class="card stat-card">
         <div class="stat-card-top">
           <div>
-            <div class="stat-label">Skema &amp; Institusi</div>
-            <div class="stat-value">${fmtNumber(state.schools.length)}</div>
+            <div class="stat-label">Institusi / TUK</div>
+            <div class="stat-value">${fmtNumber(totalSchools)}</div>
           </div>
           ${iconCircle('primary', '<path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>')}
         </div>
-        <div class="stat-note"><span class="badge primary">${state.schemes.length} Skema</span> Sekolah / TUK Terdaftar</div>
+        <div class="stat-note"><span class="badge primary">${state.schemes.length} Skema</span> Terdaftar di sistem</div>
       </div>
 
       <div class="card stat-card">
         <div class="stat-card-top">
           <div>
-            <div class="stat-label">Total Peserta</div>
+            <div class="stat-label">Total Asesi / Peserta</div>
             <div class="stat-value">${fmtNumber(totals.participants)}</div>
           </div>
           ${iconCircle('info', '<path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>')}
         </div>
-        <div class="stat-note">Seluruh sekolah pada filter aktif</div>
+        <div class="stat-note">Terdaftar pada filter skema aktif</div>
       </div>
 
       <div class="card stat-card">
         <div class="stat-card-top">
           <div>
-            <div class="stat-label">Terkunci (Final)</div>
+            <div class="stat-label">Selesai &amp; Terkunci</div>
             <div class="stat-value">${fmtNumber(totals.locked)}</div>
           </div>
           ${iconCircle('success', '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>')}
         </div>
-        <div class="stat-note"><span class="badge success">${totals.participants ? Math.round((totals.locked / totals.participants) * 100) : 0}%</span> Hasil siap diekspor ke Sheet</div>
+        <div class="stat-note"><span class="badge success">${lockedPct}%</span> Hasil final siap ekspor</div>
       </div>
 
       <div class="card stat-card">
         <div class="stat-card-top">
           <div>
-            <div class="stat-label">Sedang Dinilai</div>
+            <div class="stat-label">Dalam Penilaian</div>
             <div class="stat-value">${fmtNumber(totals.in_progress)}</div>
           </div>
           ${iconCircle('warning', '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>')}
         </div>
-        <div class="stat-note">Belum dikunci · ${fmtNumber(totals.not_started)} belum mulai</div>
+        <div class="stat-note">${fmtNumber(totals.not_started)} peserta belum mulai</div>
       </div>
     </div>
 
-    <!-- AeroPanel Segmented Analytics Bar -->
-    <div class="card">
-      <div class="card-head">
-        <div>
-          <div class="card-title">Distribusi Capaian Kompetensi Peserta</div>
-          <div class="card-sub">Rekapitulasi otomatis real-time tanpa rumus manual Google Sheet.</div>
+    <!-- 2-Column Section: Segmented Analytics & Active Scheme Highlights -->
+    <div class="dashboard-split-grid">
+      <!-- Left: Distribution Analytics -->
+      <div class="card" style="margin-bottom:0">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Distribusi Capaian Kompetensi</div>
+            <div class="card-sub">Rekap otomatis real-time dari seluruh asesmen peserta</div>
+          </div>
+          <a class="btn small ghost" href="#/recap">Analitik Detail &rarr;</a>
         </div>
-        <a class="btn small ghost" href="#/recap">Lihat Analitik Unit &rarr;</a>
+        <div class="card-body">
+          <div class="segmented-bar" role="img" aria-label="Distribusi capaian kompetensi">
+            <div class="segmented-slice success" style="width:${pPenuh}%" title="Kompeten Penuh: ${outcomes.kompeten_penuh || 0}"></div>
+            <div class="segmented-slice primary" style="width:${pSub}%" title="Kompeten Sub: ${outcomes.kompeten_sub || 0}"></div>
+            <div class="segmented-slice info" style="width:${pUnit}%" title="Kompeten Unit: ${outcomes.kompeten_unit || 0}"></div>
+            <div class="segmented-slice danger" style="width:${pBelum}%" title="Belum Kompeten: ${outcomes.belum_kompeten || 0}"></div>
+          </div>
+          <div class="legend-grid">
+            <div class="legend-item">
+              <span class="nowrap"><span class="legend-dot" style="background:var(--success)"></span>Kompeten Penuh</span>
+              <strong class="tabular">${fmtNumber(outcomes.kompeten_penuh || 0)} <span class="muted" style="font-size:0.75rem">(${pPenuh}%)</span></strong>
+            </div>
+            <div class="legend-item">
+              <span class="nowrap"><span class="legend-dot" style="background:var(--primary)"></span>Kompeten Sub</span>
+              <strong class="tabular">${fmtNumber(outcomes.kompeten_sub || 0)} <span class="muted" style="font-size:0.75rem">(${pSub}%)</span></strong>
+            </div>
+            <div class="legend-item">
+              <span class="nowrap"><span class="legend-dot" style="background:var(--info)"></span>Kompeten Unit</span>
+              <strong class="tabular">${fmtNumber(outcomes.kompeten_unit || 0)} <span class="muted" style="font-size:0.75rem">(${pUnit}%)</span></strong>
+            </div>
+            <div class="legend-item">
+              <span class="nowrap"><span class="legend-dot" style="background:var(--danger)"></span>Belum Kompeten</span>
+              <strong class="tabular">${fmtNumber(outcomes.belum_kompeten || 0)} <span class="muted" style="font-size:0.75rem">(${pBelum}%)</span></strong>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="card-body">
-        <div class="segmented-bar" role="img" aria-label="Distribusi capaian kompetensi">
-          <div class="segmented-slice success" style="width:${pPenuh}%" title="Kompeten Penuh: ${outcomes.kompeten_penuh || 0}"></div>
-          <div class="segmented-slice primary" style="width:${pSub}%" title="Kompeten Sub: ${outcomes.kompeten_sub || 0}"></div>
-          <div class="segmented-slice info" style="width:${pUnit}%" title="Kompeten Unit: ${outcomes.kompeten_unit || 0}"></div>
-          <div class="segmented-slice danger" style="width:${pBelum}%" title="Belum Kompeten: ${outcomes.belum_kompeten || 0}"></div>
+
+      <!-- Right: Active Schemes / Status Overview -->
+      <div class="card" style="margin-bottom:0">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Skema Kompetensi Terdaftar</div>
+            <div class="card-sub">${state.schemes.length} standar kualifikasi asesmen</div>
+          </div>
+          <a class="btn small ghost" href="#/schemes">Lihat Semua &rarr;</a>
         </div>
-        <div class="legend-grid">
-          <div class="legend-item"><span><span class="legend-dot" style="background:var(--success)"></span>Kompeten Penuh</span><strong class="tabular">${fmtNumber(outcomes.kompeten_penuh || 0)}</strong></div>
-          <div class="legend-item"><span><span class="legend-dot" style="background:var(--primary)"></span>Kompeten Sub</span><strong class="tabular">${fmtNumber(outcomes.kompeten_sub || 0)}</strong></div>
-          <div class="legend-item"><span><span class="legend-dot" style="background:var(--info)"></span>Kompeten Unit</span><strong class="tabular">${fmtNumber(outcomes.kompeten_unit || 0)}</strong></div>
-          <div class="legend-item"><span><span class="legend-dot" style="background:var(--danger)"></span>Belum Kompeten</span><strong class="tabular">${fmtNumber(outcomes.belum_kompeten || 0)}</strong></div>
+        <div class="card-body" style="padding:0">
+          <div class="dashboard-scheme-list">
+            ${state.schemes.slice(0, 4).map((s) => {
+              const isSelected = state.activeScheme === s.kode;
+              return `
+              <div class="dashboard-scheme-item ${isSelected ? 'active' : ''}">
+                <div class="grow" style="min-width:0">
+                  <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+                    ${schemeBadge(s.kode)}
+                    <span class="badge plain" style="font-size:0.7rem">v${esc(s.version)}</span>
+                  </div>
+                  <div class="row-title" style="font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.nama)}</div>
+                  <div class="row-sub">${s.units_count} Unit &bull; ${s.indicators_count} Indikator &bull; Ambang ${s.pass_threshold}%</div>
+                </div>
+                <div style="text-align:right;flex-shrink:0">
+                  <button class="btn small ${isSelected ? 'success' : 'ghost'}" type="button" data-dashboard-scheme="${esc(s.kode)}">
+                    ${isSelected ? 'Dipilih' : 'Pilih'}
+                  </button>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Schools Table -->
-    <div class="card">
+    <!-- Schools & Progress Section -->
+    <div class="card" style="margin-top:1.25rem">
       <div class="card-head">
         <div>
-          <div class="card-title">Daftar Sekolah / TUK</div>
-          <div class="card-sub">Progres dihitung dari peserta yang sudah dikunci.</div>
+          <div class="card-title">Daftar Tempat Uji Kompetensi (TUK)</div>
+          <div class="card-sub">Progres penilaian peserta yang telah dikunci pada masing-masing institusi</div>
         </div>
         <div class="toolbar">
-          <a class="btn small" href="#/schools">Tambah / Kelola Sekolah</a>
+          <a class="btn small primary" href="#/schools">+ Tambah Sekolah</a>
         </div>
       </div>
       ${state.schools.length ? `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Kode</th><th>Skema</th><th>Nama Sekolah / Institusi</th><th>Peserta</th><th>Terkunci</th><th>Progres</th><th></th></tr></thead>
+          <thead>
+            <tr>
+              <th>Kode</th>
+              <th>Skema</th>
+              <th>Sekolah / Institusi</th>
+              <th>Total Asesi</th>
+              <th>Terkunci</th>
+              <th>Kelulusan / Progres</th>
+              <th style="text-align:right">Aksi</th>
+            </tr>
+          </thead>
           <tbody>
             ${state.schools.map((school) => {
               const total = school.participant_count || 0;
@@ -760,17 +888,667 @@ async function renderDashboard() {
               return `<tr>
                 <td><span class="mono">${esc(school.kode)}</span></td>
                 <td>${schemeBadge(school.scheme_kode)}</td>
-                <td><div class="row-title">${esc(school.nama)}</div><div class="row-sub">${esc(school.alamat || '—')}</div></td>
-                <td class="tabular">${fmtNumber(total)}</td>
-                <td class="tabular">${fmtNumber(locked)}</td>
-                <td><div class="progress-line"><div class="progress"><div class="progress-bar" style="width:${percent}%"></div><span class="progress-marker"></span></div><span class="progress-num">${percent}%</span></div></td>
-                <td class="actions"><a class="btn small" href="#/schools/${school.id}">Buka</a></td>
+                <td>
+                  <div class="row-title">${esc(school.nama)}</div>
+                  <div class="row-sub">${esc(school.alamat || 'Alamat belum diatur')}</div>
+                </td>
+                <td class="tabular"><strong>${fmtNumber(total)}</strong> orang</td>
+                <td class="tabular">${fmtNumber(locked)} selesai</td>
+                <td>
+                  <div class="progress-line">
+                    <div class="progress" style="width:130px">
+                      <div class="progress-bar ${percent >= 70 ? '' : 'fail'}" style="width:${percent}%"></div>
+                      <span class="progress-marker"></span>
+                    </div>
+                    <span class="progress-num">${percent}%</span>
+                  </div>
+                </td>
+                <td class="actions">
+                  <a class="btn small primary" href="#/schools/${school.id}">Buka Asesmen &rarr;</a>
+                </td>
               </tr>`;
             }).join('')}
           </tbody>
         </table>
-      </div>` : `<div class="empty-state"><strong>Belum ada sekolah</strong><p>Tambahkan sekolah pertama untuk mulai menilai peserta.</p></div>`}
+      </div>` : `
+      <div class="empty-state">
+        <strong>Belum ada Sekolah / TUK Terdaftar</strong>
+        <p>Tambahkan sekolah baru untuk mengimpor peserta dan memulai lembar penilaian.</p>
+        <div style="margin-top:14px">
+          <a class="btn primary" href="#/schools">+ Tambah Sekolah Pertama</a>
+        </div>
+      </div>`}
     </div>`;
+
+  document.querySelectorAll('[data-dashboard-scheme]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      state.activeScheme = btn.dataset.dashboardScheme;
+      localStorage.setItem('ukk-active-scheme', state.activeScheme);
+      syncSchemeSwitcherDom();
+      await renderDashboard();
+    });
+  });
+}
+
+async function renderExamDashboard() {
+  setPage('Dashboard', 'Statistik Ujian');
+  const filters = state.examDashboardFilters;
+  const params = new URLSearchParams();
+  if (filters.exam_id) params.set('exam_id', filters.exam_id);
+  if (filters.school_id) params.set('school_id', filters.school_id);
+  if (filters.scheme_kode) params.set('scheme_kode', filters.scheme_kode);
+  const data = await api(`/exams/dashboard${params.size ? `?${params}` : ''}`);
+  const selectedExam = filters.exam_id || (data.exam ? String(data.exam.id) : '');
+  const examOptions = [
+    `<option value="" ${selectedExam === '' ? 'selected' : ''}>Ujian aktif terbaru</option>`,
+    ...data.exams.map((exam) => `<option value="${exam.id}" ${selectedExam === String(exam.id) ? 'selected' : ''}>${esc(exam.title)} · ${exam.year} (${esc(exam.status)})</option>`),
+    `<option value="all" ${selectedExam === 'all' ? 'selected' : ''}>Semua ujian (lintas periode)</option>`,
+  ].join('');
+  const selectedSchool = filters.school_id;
+  const selectedScheme = filters.scheme_kode;
+  const stats = data.stats;
+  const pct = (value) => value == null ? '—' : `${Number(value).toFixed(2)}%`;
+  document.querySelector('#view').innerHTML = `
+    <div class="page-head">
+      <div>
+        <h2>Ringkasan ujian</h2>
+        <p class="sub muted">${data.exam ? `${esc(data.exam.title)} · ${data.exam.year}` : 'Pilih ujian atau buat ujian pertama untuk memulai.'}</p>
+      </div>
+      <div class="head-actions"><a class="btn primary" href="#/exams">Kelola ujian</a></div>
+    </div>
+    <div class="card card-body">
+      <div class="form-grid">
+        <div class="field"><label for="dash-exam">Periode ujian</label><select id="dash-exam">${examOptions}</select></div>
+        <div class="field"><label for="dash-school">Sekolah</label><select id="dash-school">
+          <option value="">Semua sekolah</option>
+          ${data.schools.map((school) => `<option value="${school.id}" ${selectedSchool === String(school.id) ? 'selected' : ''}>${esc(school.nama)}</option>`).join('')}
+        </select></div>
+        <div class="field"><label for="dash-scheme">Skema</label><select id="dash-scheme">
+          <option value="">Semua skema</option>
+          ${data.schemes.map((scheme) => `<option value="${esc(scheme.kode)}" ${selectedScheme === scheme.kode ? 'selected' : ''}>${esc(scheme.kode)} — ${esc(scheme.nama)}</option>`).join('')}
+        </select></div>
+      </div>
+    </div>
+    ${data.exam || selectedExam === 'all' ? `
+    <div class="stat-grid">
+      <div class="card stat-card"><div class="stat-label">Total asesi</div><div class="stat-value">${fmtNumber(stats.total)}</div><div class="stat-note">Tidak termasuk withdrawn</div></div>
+      <div class="card stat-card"><div class="stat-label">Sudah dinilai</div><div class="stat-value">${fmtNumber(stats.assessed)}</div><div class="stat-note">Cakupan ${pct(stats.completion_percent)}</div></div>
+      <div class="card stat-card"><div class="stat-label">Lulus</div><div class="stat-value">${fmtNumber(stats.passed)}</div><div class="stat-note">${stats.assessed ? `${pct(stats.pass_percent)} dari ${fmtNumber(stats.assessed)} hasil final` : 'Belum ada hasil final'}</div></div>
+      <div class="card stat-card"><div class="stat-label">Tidak lulus</div><div class="stat-value">${fmtNumber(stats.failed)}</div><div class="stat-note">${stats.assessed ? `${pct(stats.fail_percent)} dari ${fmtNumber(stats.assessed)} hasil final` : 'Belum ada hasil final'}</div></div>
+    </div>
+    <div class="card card-body">
+      <div class="card-head"><div><div class="card-title">Progres dan outcome</div><div class="card-sub">Persentase kelulusan memakai hasil asesmen terkunci sebagai denominator.</div></div></div>
+      <div class="detail-list">
+        <dt>Belum mulai</dt><dd>${fmtNumber(stats.not_started)}</dd>
+        <dt>Sedang dinilai</dt><dd>${fmtNumber(stats.in_progress)}</dd>
+        <dt>Hasil final</dt><dd>${fmtNumber(stats.result_denominator)} dari ${fmtNumber(stats.total)}</dd>
+        <dt>Kompeten penuh</dt><dd>${fmtNumber(stats.outcomes.kompeten_penuh)}</dd>
+        <dt>Kompeten sub kompetensi</dt><dd>${fmtNumber(stats.outcomes.kompeten_sub)}</dd>
+        <dt>Kompeten unit</dt><dd>${fmtNumber(stats.outcomes.kompeten_unit)}</dd>
+        <dt>Belum kompeten</dt><dd>${fmtNumber(stats.outcomes.belum_kompeten)}</dd>
+      </div>
+    </div>` : `
+    <div class="card empty-state">
+      <strong>Belum ada data ujian</strong>
+      <p>Buat ujian, tambahkan sekolah dan skema, lalu daftarkan peserta ke roster.</p>
+      <a class="btn primary" href="#/exams">Buat ujian</a>
+    </div>`}`;
+  ['dash-exam', 'dash-school', 'dash-scheme'].forEach((id) => {
+    document.getElementById(id).addEventListener('change', async () => {
+      filters.exam_id = document.querySelector('#dash-exam').value;
+      filters.school_id = document.querySelector('#dash-school').value;
+      filters.scheme_kode = document.querySelector('#dash-scheme').value;
+      localStorage.setItem('ukk-dashboard-exam', filters.exam_id);
+      await renderExamDashboard();
+    });
+  });
+}
+
+async function renderExams() {
+  setPage('Ujian', 'Periode Asesmen');
+  const [schoolsRes, examsRes] = await Promise.all([
+    api('/schools'),
+    api('/exams'),
+  ]);
+  state.schools = schoolsRes.data || [];
+  const exams = examsRes.data || [];
+  document.querySelector('#view').innerHTML = `
+    <div class="page-head">
+      <div><h2>Ujian tahunan</h2><p class="sub muted">Kelola periode, sekolah, skema, roster peserta, dan status asesmen secara terpisah dari data induk sekolah.</p></div>
+      <div class="head-actions"><button class="btn primary" id="create-exam" type="button">Buat ujian</button></div>
+    </div>
+    <div class="card card-body">
+      <div class="toolbar">
+        <input id="exam-search" type="search" placeholder="Cari judul ujian" aria-label="Cari judul ujian">
+        <select id="exam-status" aria-label="Filter status">
+          <option value="">Semua status</option><option value="draft">Draft</option><option value="active">Aktif</option><option value="closed">Ditutup</option><option value="archived">Arsip</option>
+        </select>
+        <input id="exam-year" type="number" min="2000" max="2200" placeholder="Tahun" aria-label="Filter tahun">
+        <button id="exam-filter" class="btn small" type="button">Terapkan</button>
+      </div>
+    </div>
+    <div class="card">
+      ${exams.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Judul / tahun</th><th>Status</th><th>Tanggal</th><th>Sekolah</th><th>Skema</th><th>Asesi</th><th></th></tr></thead>
+        <tbody>${exams.map((exam) => `<tr>
+          <td><div class="row-title">${esc(exam.title)}</div><div class="row-sub">${exam.year}</div></td>
+          <td>${examStatusBadge(exam.status)}</td>
+          <td>${esc(exam.starts_on || '—')}${exam.ends_on ? ` – ${esc(exam.ends_on)}` : ''}</td>
+          <td>${exam.schools.map((item) => esc(item.nama)).join(', ') || '—'}</td>
+          <td>${exam.schemes.map((item) => `<span class="badge mono">${esc(item.kode)}</span>`).join(' ') || '—'}</td>
+          <td class="tabular">${fmtNumber(exam.enrollment_count)}</td>
+          <td class="actions"><a class="btn small" href="#/exams/${exam.id}">Buka</a></td>
+        </tr>`).join('')}</tbody></table></div>` : `
+        <div class="empty-state"><strong>Belum ada ujian</strong><p>Buat periode ujian untuk mulai menyusun roster dan hasil.</p><button class="btn primary" id="create-exam-empty" type="button">Buat ujian pertama</button></div>`}
+    </div>`;
+  document.querySelector('#create-exam').addEventListener('click', () => openExamModal());
+  document.querySelector('#create-exam-empty')?.addEventListener('click', () => openExamModal());
+  document.querySelector('#exam-filter').addEventListener('click', async () => {
+    const params = new URLSearchParams();
+    const title = document.querySelector('#exam-search').value.trim();
+    const status = document.querySelector('#exam-status').value;
+    const year = document.querySelector('#exam-year').value;
+    if (title) params.set('search', title);
+    if (status) params.set('status', status);
+    if (year) params.set('year', year);
+    const filtered = await api(`/exams?${params}`);
+    const body = document.querySelector('#view tbody');
+    if (!body) return;
+    body.innerHTML = filtered.data.map((exam) => `<tr>
+      <td><div class="row-title">${esc(exam.title)}</div><div class="row-sub">${exam.year}</div></td>
+      <td>${examStatusBadge(exam.status)}</td><td>${esc(exam.starts_on || '—')}${exam.ends_on ? ` – ${esc(exam.ends_on)}` : ''}</td>
+      <td>${exam.schools.map((item) => esc(item.nama)).join(', ') || '—'}</td>
+      <td>${exam.schemes.map((item) => `<span class="badge mono">${esc(item.kode)}</span>`).join(' ') || '—'}</td>
+      <td class="tabular">${fmtNumber(exam.enrollment_count)}</td><td class="actions"><a class="btn small" href="#/exams/${exam.id}">Buka</a></td>
+    </tr>`).join('') || '<tr><td colspan="7">Tidak ada ujian yang cocok.</td></tr>';
+  });
+}
+
+function examStatusBadge(status) {
+  const tones = { draft: '', active: 'success', closed: 'warning', archived: 'info' };
+  const labels = { draft: 'Draft', active: 'Aktif', closed: 'Ditutup', archived: 'Arsip' };
+  return `<span class="badge ${tones[status] || ''}">${labels[status] || esc(status)}</span>`;
+}
+
+async function openExamModal(exam = null) {
+  const [schoolRes, schemeRes] = await Promise.all([api('/schools'), api('/schemes')]);
+  const schools = schoolRes.data || [];
+  const schemes = schemeRes.data || [];
+  const selectedSchools = new Set((exam?.schools || []).map((item) => item.id));
+  const selectedSchemes = new Set((exam?.schemes || []).map((item) => item.kode));
+  openModal({
+    title: exam ? 'Ubah ujian' : 'Buat ujian',
+    body: `
+      <form id="exam-form">
+        <div class="form-grid">
+          <div class="field full"><label for="exam-title">Judul ujian</label><input id="exam-title" name="title" maxlength="160" required value="${esc(exam?.title || '')}"></div>
+          <div class="field"><label for="exam-year-input">Tahun</label><input id="exam-year-input" name="year" type="number" min="2000" max="2200" required value="${exam?.year || new Date().getFullYear()}"></div>
+          <div class="field"><label for="exam-starts">Tanggal mulai</label><input id="exam-starts" name="starts_on" type="date" value="${esc(exam?.starts_on || '')}"></div>
+          <div class="field"><label for="exam-ends">Tanggal selesai</label><input id="exam-ends" name="ends_on" type="date" value="${esc(exam?.ends_on || '')}"></div>
+          <div class="field full"><label for="exam-schools">Sekolah (Ctrl/Cmd untuk memilih beberapa)</label><select id="exam-schools" multiple size="4">${schools.map((school) => `<option value="${school.id}" ${selectedSchools.has(school.id) ? 'selected' : ''}>${esc(school.nama)} · ${esc(school.scheme_kode)}</option>`).join('')}</select></div>
+          <div class="field full"><label for="exam-schemes">Skema tersedia</label><select id="exam-schemes" multiple size="4">${schemes.map((scheme) => `<option value="${esc(scheme.kode)}" ${selectedSchemes.has(scheme.kode) || (!exam && state.activeScheme === scheme.kode) ? 'selected' : ''}>${esc(scheme.kode)} — ${esc(scheme.nama)}</option>`).join('')}</select></div>
+          <div class="field full"><label for="exam-notes">Catatan</label><textarea id="exam-notes" name="notes" rows="3">${esc(exam?.notes || '')}</textarea></div>
+        </div>
+        <p id="exam-form-error" class="error-text" role="alert"></p>
+      </form>`,
+    actions: [
+      { label: 'Batal', className: 'ghost' },
+      {
+        label: exam ? 'Simpan' : 'Buat ujian',
+        className: 'primary',
+        onClick: async ({ close, button }) => {
+          const form = document.querySelector('#exam-form');
+          const error = document.querySelector('#exam-form-error');
+          const payload = {
+            title: form.title.value.trim(),
+            year: Number(form.year.value),
+            starts_on: form.starts_on.value || null,
+            ends_on: form.ends_on.value || null,
+            notes: form.notes.value.trim(),
+            school_ids: [...form.querySelector('#exam-schools').selectedOptions].map((option) => Number(option.value)),
+            scheme_kodes: [...form.querySelector('#exam-schemes').selectedOptions].map((option) => option.value),
+          };
+          button.disabled = true;
+          error.textContent = '';
+          try {
+            if (exam) await api(`/exams/${exam.id}`, { method: 'PATCH', body: payload });
+            else await api('/exams', { method: 'POST', body: payload });
+            close();
+            toast(exam ? 'Ujian diperbarui.' : 'Ujian dibuat sebagai draft.', 'success');
+            await route();
+          } catch (requestError) {
+            error.textContent = requestError.message;
+            button.disabled = false;
+          }
+        },
+      },
+    ],
+  });
+}
+
+async function renderArchives() {
+  setPage('Arsip Ujian', 'Riwayat Hanya-Baca');
+  const res = await api('/archives/exams');
+  const exams = res.data || [];
+  document.querySelector('#view').innerHTML = `
+    <div class="page-head">
+      <div><h2>Arsip ujian</h2><p class="sub muted">Ujian yang diarsipkan hanya dapat ditinjau, diekspor, dan diunduh.</p></div>
+    </div>
+    <div class="card">
+      ${exams.length ? `<div class="table-wrap"><table><thead><tr><th>Judul / tahun</th><th>Tanggal arsip</th><th>Sekolah</th><th>Skema</th><th>Asesi</th><th></th></tr></thead>
+      <tbody>${exams.map((exam) => `<tr>
+        <td><div class="row-title">${esc(exam.title)}</div><div class="row-sub">${exam.year || 'Legacy'}</div></td>
+        <td>${fmtDateTime(exam.archived_at)}</td>
+        <td>${exam.schools.map((school) => esc(school.nama)).join(', ') || '—'}</td>
+        <td>${exam.schemes.map((scheme) => `<span class="badge mono">${esc(scheme.kode)}</span>`).join(' ') || '—'}</td>
+        <td>${fmtNumber(exam.enrollment_count)}</td>
+        <td class="actions"><a class="btn small" href="#/archives/${exam.id}">Tinjau</a></td>
+      </tr>`).join('')}</tbody></table></div>` : `<div class="empty-state"><strong>Belum ada ujian diarsipkan</strong><p>Setelah seluruh asesmen final, tutup dan arsipkan ujian dari halaman Ujian.</p><a class="btn" href="#/exams">Lihat ujian</a></div>`}
+    </div>`;
+}
+
+async function renderExamDetail(examId, archiveRoute = false) {
+  if (!Number.isInteger(examId) || examId <= 0) throw new Error('ID ujian tidak valid.');
+  const exam = await api(`/exams/${examId}`);
+  const readOnly = archiveRoute || exam.status === 'archived';
+  if (archiveRoute && !readOnly) {
+    navigate(`#/exams/${examId}`);
+    return;
+  }
+  const filters = state.enrollmentFilters;
+  if (filters.examId !== String(examId)) {
+    Object.assign(filters, { examId: String(examId), school_id: '', scheme_kode: '', group_label: '', status: 'enrolled' });
+    state.enrollmentPage = 0;
+  }
+  const params = new URLSearchParams({ limit: '50', offset: String(state.enrollmentPage * 50) });
+  if (filters.school_id) params.set('school_id', filters.school_id);
+  if (filters.scheme_kode) params.set('scheme_kode', filters.scheme_kode);
+  if (filters.group_label) params.set('group_label', filters.group_label);
+  if (filters.status) params.set('status', filters.status);
+  const [roster, templateRes] = await Promise.all([
+    api(`/exams/${examId}/enrollments?${params}`),
+    api(`/certificate-templates?exam_id=${examId}`),
+  ]);
+  const rows = roster.data || [];
+  const templates = (templateRes.data || []).filter((item) =>
+    item.exam_id === examId || (!item.exam_id && exam.schemes.some((scheme) => scheme.kode === item.scheme_kode))
+  );
+  const totalPages = Math.max(1, Math.ceil(roster.meta.total / 50));
+  const passing = new Set(['kompeten_penuh', 'kompeten_sub', 'kompeten_unit']);
+  setPage(exam.title, readOnly ? 'Arsip Ujian' : `Tahun ${exam.year}`);
+  document.querySelector('#view').innerHTML = `
+    <div class="page-head">
+      <div>
+        <a class="muted" href="${readOnly ? '#/archives' : '#/exams'}">&larr; ${readOnly ? 'Arsip ujian' : 'Daftar ujian'}</a>
+        <h2>${esc(exam.title)} ${examStatusBadge(exam.status)}</h2>
+        <p class="sub muted">${exam.year} ${exam.starts_on ? `· ${esc(exam.starts_on)}${exam.ends_on ? ` – ${esc(exam.ends_on)}` : ''}` : ''}${exam.notes ? ` · ${esc(exam.notes)}` : ''}</p>
+      </div>
+      <div class="head-actions">
+        ${!readOnly && exam.status === 'draft' ? '<button class="btn" id="edit-exam" type="button">Ubah</button><button class="btn primary" id="activate-exam" type="button">Aktifkan</button>' : ''}
+        ${!readOnly && exam.status === 'active' ? '<button class="btn" id="close-exam" type="button">Tutup pendaftaran</button>' : ''}
+        ${!readOnly && ['active', 'closed'].includes(exam.status) ? '<button class="btn danger" id="archive-exam" type="button">Arsipkan</button>' : ''}
+        <a class="btn ghost" href="/api/exams/${exam.id}/export?format=csv">Ekspor CSV</a>
+        <a class="btn ghost" href="/api/exams/${exam.id}/export?format=xlsx">Ekspor XLSX</a>
+      </div>
+    </div>
+    <div class="detail-list card card-body">
+      <dt>Status</dt><dd>${examStatusBadge(exam.status)}</dd>
+      <dt>Sekolah</dt><dd>${exam.schools.map((school) => esc(school.nama)).join(', ') || 'Belum dipilih'}</dd>
+      <dt>Skema</dt><dd>${exam.schemes.map((scheme) => `<span class="badge mono">${esc(scheme.kode)}</span> ${esc(scheme.nama)}`).join(' · ') || 'Belum dipilih'}</dd>
+      <dt>Jumlah asesi</dt><dd>${fmtNumber(exam.enrollment_count)}</dd>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div><div class="card-title">Roster ujian</div><div class="card-sub">${fmtNumber(roster.meta.total)} pendaftaran · identitas pada tabel adalah snapshot saat pendaftaran.</div></div>
+        ${!readOnly && ['draft', 'active'].includes(exam.status) ? `<div class="toolbar">
+          <button class="btn small" id="import-roster" type="button">Impor CSV</button><input id="roster-file" type="file" accept=".csv,text/csv" class="hidden">
+          <button class="btn small primary" id="add-enrollment" type="button">Tambah asesi</button>
+        </div>` : ''}
+      </div>
+      <div class="card-body">
+        <div class="toolbar">
+          <select id="roster-school"><option value="">Semua sekolah</option>${exam.schools.map((school) => `<option value="${school.id}" ${filters.school_id === String(school.id) ? 'selected' : ''}>${esc(school.nama)}</option>`).join('')}</select>
+          <select id="roster-scheme"><option value="">Semua skema</option>${exam.schemes.map((scheme) => `<option value="${esc(scheme.kode)}" ${filters.scheme_kode === scheme.kode ? 'selected' : ''}>${esc(scheme.kode)}</option>`).join('')}</select>
+          <input id="roster-group" type="search" value="${esc(filters.group_label)}" placeholder="Kelompok ujian">
+          <select id="roster-status"><option value="enrolled" ${filters.status === 'enrolled' ? 'selected' : ''}>Terdaftar</option><option value="withdrawn" ${filters.status === 'withdrawn' ? 'selected' : ''}>Withdrawn</option><option value="" ${filters.status === '' ? 'selected' : ''}>Semua status</option></select>
+          <button class="btn small" id="filter-roster" type="button">Filter</button>
+        </div>
+      </div>
+      ${rows.length ? `<div class="table-wrap"><table>
+        <thead><tr><th>Sekolah</th><th>Nomor / nama</th><th>Kelas / kelompok</th><th>Skema</th><th>Pendaftaran</th><th>Asesmen / hasil</th><th>Aksi</th></tr></thead>
+        <tbody>${rows.map((row) => {
+          const canCert = row.assessment_status === 'locked' && passing.has(row.result?.outcome);
+          const assessmentLabel = row.assessment_status === 'locked' ? row.result?.outcome_label || 'Terkunci' : row.assessment_status === 'in_progress' ? 'Sedang dinilai' : 'Belum mulai';
+          return `<tr>
+            <td>${esc(row.snapshot_school_name)}</td>
+            <td><div class="row-title">${esc(row.snapshot_name)}</div><div class="row-sub">${esc(row.snapshot_number)}</div></td>
+            <td>${esc(row.snapshot_class || '—')}<div class="row-sub">${esc(row.group_label || '—')}</div></td>
+            <td><span class="badge mono">${esc(row.scheme_kode)}</span></td>
+            <td>${row.status === 'withdrawn' ? '<span class="badge warning">Withdrawn</span>' : '<span class="badge success">Terdaftar</span>'}</td>
+            <td>${row.result ? outcomeBadge(row.result) : `<span class="badge">${esc(assessmentLabel)}</span>`}</td>
+            <td class="actions">
+              ${row.assessment_id ? `<a class="btn small" href="#/assessment/${row.assessment_id}">${row.assessment_status === 'locked' ? 'Hasil' : 'Lanjutkan'}</a>` : (!readOnly && exam.status === 'active' && row.status === 'enrolled' ? `<button class="btn small primary" type="button" data-assess-enrollment="${row.id}">Mulai</button>` : '')}
+              ${row.certificate_id ? `<a class="btn small ghost" href="/api/certificates/${row.certificate_id}/download">PDF sertifikat</a>` : (canCert && !readOnly ? `<button class="btn small ghost" type="button" data-issue-certificate="${row.id}">Buat sertifikat</button>` : '')}
+              ${!readOnly && !row.assessment_id && row.status === 'enrolled' && ['draft', 'active'].includes(exam.status) ? `<button class="btn small ghost" type="button" data-withdraw-enrollment="${row.id}">Keluarkan</button>` : ''}
+            </td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div>` : `<div class="empty-state"><strong>Roster belum berisi peserta</strong><p>Tambahkan asesi dari data induk atau impor CSV ke ujian ini.</p></div>`}
+      <div class="card-body toolbar">
+        <button class="btn small" id="roster-prev" type="button" ${state.enrollmentPage <= 0 ? 'disabled' : ''}>Sebelumnya</button>
+        <span class="muted">Halaman ${state.enrollmentPage + 1} dari ${totalPages}</span>
+        <button class="btn small" id="roster-next" type="button" ${state.enrollmentPage + 1 >= totalPages ? 'disabled' : ''}>Berikutnya</button>
+      </div>
+    </div>
+    ${!readOnly ? renderTemplatePanel(exam, templates) : ''}
+  `;
+  document.querySelector('#edit-exam')?.addEventListener('click', () => openExamModal(exam));
+  document.querySelector('#activate-exam')?.addEventListener('click', () => transitionExam(exam.id, 'activate'));
+  document.querySelector('#close-exam')?.addEventListener('click', () => transitionExam(exam.id, 'close'));
+  document.querySelector('#archive-exam')?.addEventListener('click', () => transitionExam(exam.id, 'archive'));
+  document.querySelector('#add-enrollment')?.addEventListener('click', () => openEnrollmentModal(exam));
+  document.querySelector('#import-roster')?.addEventListener('click', () => document.querySelector('#roster-file').click());
+  document.querySelector('#roster-file')?.addEventListener('change', (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (file) openRosterImportModal(exam, file);
+  });
+  document.querySelector('#filter-roster')?.addEventListener('click', async () => {
+    filters.school_id = document.querySelector('#roster-school').value;
+    filters.scheme_kode = document.querySelector('#roster-scheme').value;
+    filters.group_label = document.querySelector('#roster-group').value.trim();
+    filters.status = document.querySelector('#roster-status').value;
+    state.enrollmentPage = 0;
+    await renderExamDetail(examId, readOnly);
+  });
+  document.querySelector('#roster-prev')?.addEventListener('click', async () => {
+    state.enrollmentPage = Math.max(0, state.enrollmentPage - 1);
+    await renderExamDetail(examId, readOnly);
+  });
+  document.querySelector('#roster-next')?.addEventListener('click', async () => {
+    if (state.enrollmentPage + 1 < totalPages) state.enrollmentPage += 1;
+    await renderExamDetail(examId, readOnly);
+  });
+  document.querySelectorAll('[data-assess-enrollment]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const enrollment = rows.find((item) => String(item.id) === button.dataset.assessEnrollment);
+      if (enrollment) startAssessmentFor({ ...enrollment, participant_id: enrollment.participant_id, enrollment_id: enrollment.id });
+    });
+  });
+  document.querySelectorAll('[data-withdraw-enrollment]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!window.confirm('Keluarkan asesi ini dari roster? Tindakan ini tercatat dan tidak menghapus data induk.')) return;
+      try {
+        await api(`/exams/${examId}/enrollments/${button.dataset.withdrawEnrollment}/withdraw`, { method: 'POST', body: {} });
+        await renderExamDetail(examId, readOnly);
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    });
+  });
+  document.querySelectorAll('[data-issue-certificate]').forEach((button) => {
+    button.addEventListener('click', () => issueCertificate(button.dataset.issueCertificate, examId, templates));
+  });
+  if (!readOnly) bindTemplatePanel(exam, templates);
+}
+
+function renderTemplatePanel(exam, templates) {
+  return `<div class="card">
+    <div class="card-head"><div><div class="card-title">Template sertifikat DOCX</div><div class="card-sub">Template khusus ujian diprioritaskan; template skema menjadi fallback. Sertifikat internal, bukan sertifikat resmi LSP/BNSP.</div></div></div>
+    <div class="card-body">
+      <form id="template-upload-form" class="form-grid">
+        <div class="field"><label for="template-scope">Cakupan</label><select id="template-scope"><option value="exam">Khusus ujian ini</option><option value="scheme">Default skema</option></select></div>
+        <div class="field"><label for="template-scheme">Skema (untuk default skema)</label><select id="template-scheme">${exam.schemes.map((scheme) => `<option value="${esc(scheme.kode)}">${esc(scheme.kode)} — ${esc(scheme.nama)}</option>`).join('')}</select></div>
+        <div class="field"><label for="template-file">Template .docx (maks. 10 MiB)</label><input id="template-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required></div>
+        <div class="field"><button class="btn primary" type="submit">Unggah versi</button></div>
+      </form>
+      <p class="hint">Placeholder wajib: {{participant_name}}, {{participant_number}}, {{school_name}}, {{exam_title}}, {{exam_year}}, {{scheme_name}}, {{outcome_label}}, {{certificate_number}}, {{issued_date}}.</p>
+      ${templates.length ? `<div class="table-wrap"><table><thead><tr><th>Nama / versi</th><th>Cakupan</th><th>Status</th><th>Placeholder</th><th>Aksi</th></tr></thead><tbody>
+        ${templates.map((item) => `<tr>
+          <td><div class="row-title">${esc(item.original_name)}</div><div class="row-sub">v${item.version} · ${esc(item.checksum.slice(0, 12))}…</div></td>
+          <td>${item.exam_id ? 'Ujian ini' : `Skema ${esc(item.scheme_kode || '—')}`}</td>
+          <td>${item.active ? '<span class="badge success">Aktif</span>' : item.previewed_at ? '<span class="badge">Preview siap</span>' : '<span class="badge warning">Belum preview</span>'}</td>
+          <td>${item.placeholders.map((name) => `<span class="badge">${esc(name)}</span>`).join(' ')}</td>
+          <td class="actions"><button class="btn small" type="button" data-preview-template="${item.id}">Preview PDF</button>${!item.active ? `<button class="btn small primary" type="button" data-activate-template="${item.id}" ${item.previewed_at ? '' : 'disabled'}>Aktifkan</button>` : ''}</td>
+        </tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted">Belum ada template pada cakupan ujian/skema ini.</p>'}
+    </div>
+  </div>`;
+}
+
+function bindTemplatePanel(exam, templates) {
+  document.querySelector('#template-scope')?.addEventListener('change', (event) => {
+    document.querySelector('#template-scheme').disabled = event.target.value !== 'scheme';
+  });
+  const form = document.querySelector('#template-upload-form');
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const file = document.querySelector('#template-file').files?.[0];
+    if (!file) return;
+    const payload = new FormData();
+    if (document.querySelector('#template-scope').value === 'exam') payload.append('exam_id', exam.id);
+    else payload.append('scheme_kode', document.querySelector('#template-scheme').value);
+    payload.append('file', file);
+    try {
+      const result = await api('/certificate-templates', { method: 'POST', body: payload });
+      toast(`Template versi ${result.version} diunggah. Preview sebelum aktivasi.`, 'success');
+      await renderExamDetail(exam.id);
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
+  document.querySelectorAll('[data-preview-template]').forEach((button) => {
+    button.addEventListener('click', () => previewTemplate(button.dataset.previewTemplate, exam.id));
+  });
+  document.querySelectorAll('[data-activate-template]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        await api(`/certificate-templates/${button.dataset.activateTemplate}/activate`, { method: 'POST', body: {} });
+        toast('Template diaktifkan.', 'success');
+        await renderExamDetail(exam.id);
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    });
+  });
+}
+
+async function previewTemplate(templateId, examId) {
+  const popup = window.open('about:blank', '_blank');
+  try {
+    const response = await fetch(`/api/certificate-templates/${templateId}/preview`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'fetch' },
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.message || data.error || `Preview gagal (${response.status}).`);
+    }
+    const blob = await response.blob();
+    if (popup) popup.location.href = URL.createObjectURL(blob);
+    else {
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'preview-sertifikat.pdf';
+      link.click();
+    }
+    toast('Preview berhasil. Template kini dapat diaktifkan.', 'success');
+    await renderExamDetail(examId);
+  } catch (error) {
+    popup?.close();
+    toast(error.message, 'error');
+  }
+}
+
+async function transitionExam(examId, action) {
+  const messages = {
+    activate: 'Aktifkan ujian? Peserta dapat mulai dinilai.',
+    close: 'Tutup pendaftaran? Asesmen yang berjalan masih dapat diselesaikan.',
+    archive: 'Arsipkan ujian? Arsip bersifat hanya-baca dan tidak dapat dibuka kembali.',
+  };
+  if (!window.confirm(messages[action])) return;
+  try {
+    await api(`/exams/${examId}/${action}`, { method: 'POST', body: {} });
+    toast(action === 'archive' ? 'Ujian diarsipkan.' : 'Status ujian diperbarui.', 'success');
+    if (action === 'archive') navigate(`#/archives/${examId}`);
+    else await renderExamDetail(examId);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function openEnrollmentModal(exam) {
+  const choices = exam.schools.filter((school) =>
+    exam.schemes.some((scheme) => scheme.kode === school.scheme_kode)
+  );
+  openModal({
+    title: 'Tambah asesi ke roster',
+    body: `
+      <form id="enrollment-form">
+        <div class="field"><label for="enrollment-school">Sekolah</label><select id="enrollment-school">${choices.map((school) => `<option value="${school.id}">${esc(school.nama)}</option>`).join('')}</select></div>
+        <div class="field"><label for="enrollment-participant">Peserta dari daftar induk</label><select id="enrollment-participant"></select></div>
+        <div class="field"><label for="enrollment-group">Kelompok ujian</label><input id="enrollment-group" placeholder="Contoh: XII TKJ 1"></div>
+        <p id="enrollment-error" class="error-text" role="alert"></p>
+      </form>`,
+    actions: [
+      { label: 'Batal', className: 'ghost' },
+      {
+        label: 'Tambahkan',
+        className: 'primary',
+        onClick: async ({ close, button }) => {
+          const school = exam.schools.find((item) => String(item.id) === document.querySelector('#enrollment-school').value);
+          const participantId = Number(document.querySelector('#enrollment-participant').value);
+          const error = document.querySelector('#enrollment-error');
+          button.disabled = true;
+          try {
+            await api(`/exams/${exam.id}/enrollments`, {
+              method: 'POST',
+              body: {
+                participant_id: participantId,
+                scheme_kode: school.scheme_kode,
+                group_label: document.querySelector('#enrollment-group').value.trim(),
+              },
+            });
+            close();
+            toast('Asesi masuk ke roster ujian.', 'success');
+            await renderExamDetail(exam.id);
+          } catch (requestError) {
+            error.textContent = requestError.message;
+            button.disabled = false;
+          }
+        },
+      },
+    ],
+    onMount: (root) => {
+      const select = root.querySelector('#enrollment-school');
+      const participantSelect = root.querySelector('#enrollment-participant');
+      const loadParticipants = async () => {
+        const participants = await api(`/schools/${select.value}/participants`);
+        participantSelect.innerHTML = participants.data.map((participant) => `<option value="${participant.id}">${esc(participant.nomor)} — ${esc(participant.nama)} (${esc(participant.kelas || '—')})</option>`).join('');
+      };
+      select.addEventListener('change', () => loadParticipants().catch((error) => toast(error.message, 'error')));
+      loadParticipants().catch((error) => toast(error.message, 'error'));
+    },
+  });
+}
+
+function openRosterImportModal(exam, file) {
+  openModal({
+    title: 'Impor roster CSV',
+    body: `
+      <form id="roster-import-form">
+        <div class="field"><label for="import-school">Sekolah</label><select id="import-school">${exam.schools.map((school) => `<option value="${school.id}">${esc(school.nama)}</option>`).join('')}</select></div>
+        <div class="field"><label for="import-group">Kelompok default (opsional)</label><input id="import-group" placeholder="Bisa ditimpa kolom kelompok"></div>
+        <p class="hint">Kolom wajib: nomor, nama. Opsional: kelas, kelompok. Peserta baru dibuat pada daftar induk; nomor yang sama dengan nama berbeda dilaporkan, tidak menimpa data.</p>
+        <p id="roster-import-error" class="error-text" role="alert"></p>
+      </form>`,
+    actions: [
+      { label: 'Batal', className: 'ghost' },
+      {
+        label: 'Impor',
+        className: 'primary',
+        onClick: async ({ close, button }) => {
+          const school = exam.schools.find((item) => String(item.id) === document.querySelector('#import-school').value);
+          const payload = new FormData();
+          payload.append('school_id', school.id);
+          payload.append('scheme_kode', school.scheme_kode);
+          payload.append('group_label', document.querySelector('#import-group').value.trim());
+          payload.append('file', file);
+          button.disabled = true;
+          try {
+            const result = await api(`/exams/${exam.id}/enrollments/import`, { method: 'POST', body: payload });
+            close();
+            const detail = [
+              ...(result.errors || []).map((item) => `<li>Baris ${esc(item.row)}: ${esc(item.message)}</li>`),
+              ...(result.duplicates || []).map((item) => `<li>Baris ${esc(item.row)}: ${esc(item.nomor)} — ${esc(item.reason)}</li>`),
+            ].join('');
+            openModal({
+              title: 'Hasil impor roster',
+              body: `<p><strong>${result.imported}</strong> asesi terdaftar; ${result.created_master} peserta baru masuk daftar induk.</p>
+                <p class="muted">${result.errors.length} baris bermasalah, ${result.duplicates.length} duplikat.</p>
+                ${detail ? `<ul class="instruction-list">${detail}</ul>` : ''}`,
+              actions: [{ label: 'Tutup', className: 'primary' }],
+            });
+            await renderExamDetail(exam.id);
+          } catch (error) {
+            document.querySelector('#roster-import-error').textContent = error.message;
+            button.disabled = false;
+          }
+        },
+      },
+    ],
+  });
+}
+
+async function issueCertificate(enrollmentId, examId) {
+  try {
+    const templates = await api(`/certificate-templates?exam_id=${examId}`);
+    const exam = await api(`/exams/${examId}`);
+    const available = templates.data.filter((item) =>
+      item.active && (item.exam_id === exam.id || (!item.exam_id && exam.schemes.some((scheme) => scheme.kode === item.scheme_kode)))
+    );
+    if (!available.length) {
+      toast('Aktifkan template sertifikat yang sudah dipreview terlebih dahulu.', 'warning');
+      return;
+    }
+    const formOptions = available.map((item) => `<option value="${item.id}">${esc(item.original_name)} · v${item.version}</option>`).join('');
+    openModal({
+      title: 'Terbitkan sertifikat internal',
+      body: `<p class="hint">Hanya hasil asesmen terkunci dengan outcome kompeten yang dapat menerima sertifikat.</p>
+        <div class="field"><label for="issue-template">Template</label><select id="issue-template">${formOptions}</select></div>
+        <label class="check-row"><input id="issue-reissue" type="checkbox"> Terbitkan ulang dengan nomor baru</label>
+        <p id="issue-error" class="error-text" role="alert"></p>`,
+      actions: [
+        { label: 'Batal', className: 'ghost' },
+        {
+          label: 'Buat PDF',
+          className: 'primary',
+          onClick: async ({ close, button }) => {
+            button.disabled = true;
+            try {
+              const issued = await api(`/enrollments/${enrollmentId}/certificate`, {
+                method: 'POST',
+                body: {
+                  template_id: Number(document.querySelector('#issue-template').value),
+                  reissue: document.querySelector('#issue-reissue').checked,
+                },
+              });
+              close();
+              toast(issued.already_issued ? 'Sertifikat sebelumnya sudah diterbitkan.' : `Sertifikat ${issued.certificate_number} dibuat.`, 'success');
+              window.open(`/api/certificates/${issued.id}/download`, '_blank', 'noopener');
+              await renderExamDetail(examId);
+            } catch (error) {
+              document.querySelector('#issue-error').textContent = error.message;
+              button.disabled = false;
+            }
+          },
+        },
+      ],
+    });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1173,9 +1951,21 @@ function openSchoolModal(school = null) {
   });
 }
 
-async function renderSchool(schoolId) {
-  setPage('Sekolah', 'Peserta');
-  const data = await api(`/schools/${schoolId}/overview`);
+async function renderSchool(schoolId, requestedExamId = null) {
+  setPage('Sekolah', 'Data Induk');
+  const [data, examsRes] = await Promise.all([
+    api(`/schools/${schoolId}/overview`),
+    api(`/exams?school_id=${schoolId}`),
+  ]);
+  const relatedExams = examsRes.data || [];
+  const selectedExam = relatedExams.find((exam) => exam.id === Number(requestedExamId))
+    || relatedExams.find((exam) => exam.status === 'active')
+    || relatedExams.find((exam) => exam.status !== 'archived')
+    || relatedExams[0]
+    || null;
+  const roster = selectedExam
+    ? await api(`/schools/${schoolId}/participants?exam_id=${selectedExam.id}`)
+    : { data: [], meta: { total: 0 } };
   state.schoolData = data;
   const school = data.school;
   const stats = data.stats;
@@ -1191,41 +1981,50 @@ async function renderSchool(schoolId) {
       </div>
       <div class="head-actions">
         <button class="btn" id="edit-school" type="button">Edit sekolah</button>
-        <button class="btn primary" id="next-participant" type="button">Peserta berikutnya</button>
-        <a class="btn ghost" href="#/schools/${school.id}/results">Hasil &amp; ekspor</a>
+        <button class="btn primary" id="add-participant" type="button">Tambah peserta</button>
       </div>
-    </div>
-    <div class="stat-grid">
-      <div class="card stat-card"><div class="stat-label">Peserta</div><div class="stat-value">${fmtNumber(stats.participants)}</div><div class="stat-note">Terdaftar</div></div>
-      <div class="card stat-card"><div class="stat-label">Terkunci</div><div class="stat-value">${fmtNumber(stats.locked)}</div><div class="stat-note">${fmtPercent(stats.percent_locked)}</div></div>
-      <div class="card stat-card"><div class="stat-label">Sedang dinilai</div><div class="stat-value">${fmtNumber(stats.in_progress)}</div><div class="stat-note">Belum dikunci</div></div>
-      <div class="card stat-card"><div class="stat-label">Belum mulai</div><div class="stat-value">${fmtNumber(stats.not_started)}</div><div class="stat-note">Belum ada assessment</div></div>
     </div>
     <div class="card">
       <div class="card-head">
-        <div><div class="card-title">Peserta</div><div class="card-sub">Skor 0–3 per indikator (${indCount} indikator pada skema ${esc(school.scheme_kode || 'JNT-SMK')}).</div></div>
+        <div><div class="card-title">Roster ujian</div><div class="card-sub">Siswa dikelompokkan per judul dan tahun ujian; data induk tidak otomatis didaftarkan.</div></div>
+        ${selectedExam ? `<div class="toolbar">
+          <label class="sr-only" for="school-exam-select">Pilih ujian</label>
+          <select id="school-exam-select">${relatedExams.map((exam) => `<option value="${exam.id}" ${selectedExam.id === exam.id ? 'selected' : ''}>${esc(exam.title)} · ${exam.year} (${esc(exam.status)})</option>`).join('')}</select>
+          <a class="btn small" href="#/exams/${selectedExam.id}">Kelola roster</a>
+        </div>` : ''}
+      </div>
+      ${selectedExam ? (roster.data.length ? `<div class="table-wrap"><table><thead><tr><th>Nomor</th><th>Nama snapshot</th><th>Kelas / kelompok</th><th>Skema</th><th>Status</th><th>Hasil</th><th></th></tr></thead><tbody>
+        ${roster.data.map((item) => `<tr>
+          <td>${esc(item.nomor)}</td><td><div class="row-title">${esc(item.nama)}</div></td>
+          <td>${esc(item.kelas || '—')}<div class="row-sub">${esc(item.group_label || '—')}</div></td>
+          <td><span class="badge mono">${esc(item.scheme_kode)}</span></td>
+          <td>${item.enrollment_status === 'withdrawn' ? '<span class="badge warning">Withdrawn</span>' : statusBadge(item.assessment_status || 'not_started')}</td>
+          <td>${outcomeBadge(item.result)}</td>
+          <td class="actions">${item.assessment_id ? `<a class="btn small" href="#/assessment/${item.assessment_id}">Hasil</a>` : `<a class="btn small" href="#/exams/${selectedExam.id}">Lihat</a>`}</td>
+        </tr>`).join('')}
+      </tbody></table></div>` : `<div class="empty-state"><strong>Belum ada asesi untuk ${esc(selectedExam.title)} · ${selectedExam.year}</strong><p>Peserta dari daftar induk dapat ditambahkan ke roster ujian ini.</p><a class="btn primary" href="#/exams/${selectedExam.id}">Kelola roster</a></div>`) : `<div class="empty-state"><strong>Belum ada ujian</strong><p>Buat ujian terlebih dahulu, lalu tambahkan sekolah ini dan susun roster periode tersebut.</p><a class="btn primary" href="#/exams">Buat ujian</a></div>`}
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div><div class="card-title">Daftar induk peserta</div><div class="card-sub">${fmtNumber(stats.participants)} peserta · ${indCount} indikator pada skema ${esc(school.scheme_kode || 'JNT-SMK')}. Pendaftaran asesmen dilakukan dari roster ujian.</div></div>
         <div class="toolbar">
           <button class="btn small" id="download-template" type="button">Contoh CSV</button>
           <button class="btn small" id="import-trigger" type="button">Impor CSV</button>
           <input id="import-file" type="file" accept=".csv,text/csv" class="hidden">
-          <button class="btn small primary" id="add-participant" type="button">Tambah peserta</button>
         </div>
       </div>
       ${data.participants.length ? `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Nomor</th><th>Nama</th><th>Kelas</th><th>Status</th><th>Progres</th><th>Hasil</th><th></th></tr></thead>
+          <thead><tr><th>Nomor</th><th>Nama</th><th>Kelas</th><th>Asesmen lama</th><th></th></tr></thead>
           <tbody>
             ${data.participants.map((participant) => `<tr>
               <td class="tabular">${esc(participant.nomor)}</td>
               <td><div class="row-title">${esc(participant.nama)}</div></td>
               <td>${esc(participant.kelas || '—')}</td>
-              <td>${statusBadge(participant.status)}</td>
-              <td><div class="progress-line"><div class="progress"><div class="progress-bar ${participant.status === 'locked' ? '' : 'fail'}" style="width:${Math.max(0, Math.min(100, participant.progress_percent || 0))}%"></div><span class="progress-marker"></span></div><span class="progress-num">${Number(participant.progress_percent || 0).toFixed(0)}%</span></div></td>
-              <td>${outcomeBadge(participant.result)}</td>
+              <td>${participant.assessment_id ? statusBadge(participant.status) : '<span class="badge">Belum ada</span>'}</td>
               <td class="actions">
-                <button class="btn small ${participant.status === 'in_progress' ? 'primary' : ''}" type="button" data-assess="${participant.id}">${participant.assessment_id ? 'Lanjutkan' : 'Nilai'}</button>
-                ${participant.assessment_id ? `<a class="btn small ghost" href="#/schools/${school.id}/results">Hasil</a>` : ''}
+                ${participant.assessment_id ? `<a class="btn small ghost" href="#/assessment/${participant.assessment_id}">Lihat data lama</a>` : ''}
               </td>
             </tr>`).join('')}
           </tbody>
@@ -1234,20 +2033,16 @@ async function renderSchool(schoolId) {
     </div>`;
 
   document.querySelector('#edit-school').addEventListener('click', () => openSchoolModal(school));
+  document.querySelector('#school-exam-select')?.addEventListener('change', (event) => {
+    renderSchool(schoolId, Number(event.target.value)).catch((error) => renderError(error));
+  });
   document.querySelector('#add-participant').addEventListener('click', () => openParticipantModal(school.id));
-  document.querySelector('#next-participant').addEventListener('click', () => nextParticipant(data.participants));
   document.querySelector('#download-template').addEventListener('click', downloadCsvTemplate);
   document.querySelector('#import-trigger').addEventListener('click', () => document.querySelector('#import-file').click());
   document.querySelector('#import-file').addEventListener('change', (event) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (file) importCsv(school.id, file);
-  });
-  document.querySelectorAll('[data-assess]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const participant = data.participants.find((item) => String(item.id) === button.dataset.assess);
-      if (participant) startAssessmentFor(participant);
-    });
   });
 }
 
@@ -1347,9 +2142,17 @@ async function startAssessmentFor(participant) {
       navigate(`#/assessment/${participant.assessment_id}`);
       return;
     }
+    if (!participant.enrollment_id) {
+      toast('Daftarkan peserta ke ujian aktif sebelum memulai asesmen.', 'warning');
+      return;
+    }
     const data = await api('/assessments', {
       method: 'POST',
-      body: { participant_id: participant.id },
+      body: {
+        participant_id: participant.participant_id || participant.id,
+        enrollment_id: participant.enrollment_id,
+        scheme_kode: participant.scheme_kode,
+      },
     });
     navigate(`#/assessment/${data.assessment.id}`);
   } catch (error) {

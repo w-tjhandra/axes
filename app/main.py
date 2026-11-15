@@ -24,11 +24,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 try:
-    from . import auth, backup, db, recap, rules, sheets
+    from . import auth, backup, db, exams, recap, rules, sheets
 except ImportError:  # pragma: no cover
     import auth  # type: ignore[no-redef]
     import backup  # type: ignore[no-redef]
     import db  # type: ignore[no-redef]
+    import exams  # type: ignore[no-redef]
     import recap  # type: ignore[no-redef]
     import rules  # type: ignore[no-redef]
     import sheets  # type: ignore[no-redef]
@@ -107,6 +108,7 @@ class ParticipantPatch(BaseModel):
 class AssessmentStart(BaseModel):
     participant_id: int
     scheme_kode: str | None = None
+    enrollment_id: int
 
 
 class ScoreItem(BaseModel):
@@ -182,6 +184,7 @@ class SyncScoresBody(BaseModel):
 
 class SheetsBody(BaseModel):
     school_id: int | None = None
+    exam_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +256,17 @@ def latest_assessment(conn: sqlite3.Connection, participant_id: int):
         "SELECT * FROM assessment WHERE participant_id = ? ORDER BY id DESC LIMIT 1",
         (participant_id,),
     ).fetchone()
+
+
+def assessment_exam_status(conn: sqlite3.Connection, assessment_id: int) -> str | None:
+    row = conn.execute(
+        """SELECT e.status FROM assessment a
+           JOIN exam_enrollment ee ON ee.id = a.exam_enrollment_id
+           JOIN exam e ON e.id = ee.exam_id
+           WHERE a.id = ?""",
+        (assessment_id,),
+    ).fetchone()
+    return row["status"] if row else None
 
 
 def compute_assessment_result(conn: sqlite3.Connection, assessment) -> dict[str, Any]:
@@ -339,10 +353,23 @@ def assessment_full(conn: sqlite3.Connection, assessment) -> dict[str, Any]:
     cfg_rules = config_for_rules(conn, snapshot)
     scheme_kode = snapshot.get("scheme_kode") or school["scheme_kode"] or db.DEFAULT_SCHEME_KODE
     scheme_nama = snapshot.get("scheme_nama") or "Junior Network Technician"
+    enrollment = (
+        conn.execute(
+            """SELECT ee.id, ee.exam_id, ee.group_label, ee.status AS enrollment_status,
+                      e.title AS exam_title, e.year AS exam_year, e.status AS exam_status
+               FROM exam_enrollment ee JOIN exam e ON e.id = ee.exam_id
+               WHERE ee.id = ?""",
+            (assessment["exam_enrollment_id"],),
+        ).fetchone()
+        if assessment["exam_enrollment_id"]
+        else None
+    )
     return {
         "assessment": {
             "id": assessment["id"],
             "participant_id": assessment["participant_id"],
+            "enrollment_id": assessment["exam_enrollment_id"],
+            "exam": dict(enrollment) if enrollment else None,
             "scheme_kode": scheme_kode,
             "scheme_nama": scheme_nama,
             "instrument_version": assessment["instrument_version"],
@@ -432,7 +459,12 @@ def school_overview(conn: sqlite3.Connection, school) -> dict[str, Any]:
     return {"school": school_dict, "stats": stats, "participants": rows}
 
 
-def school_result_rows(conn: sqlite3.Connection, school_id: int, status_filter: str = "all") -> list[dict[str, Any]]:
+def school_result_rows(
+    conn: sqlite3.Connection,
+    school_id: int,
+    status_filter: str = "all",
+    include_active: bool = False,
+) -> list[dict[str, Any]]:
     school = conn.execute("SELECT * FROM school WHERE id = ?", (school_id,)).fetchone()
     participants = conn.execute(
         "SELECT * FROM participant WHERE school_id = ? ORDER BY nomor", (school_id,)
@@ -440,19 +472,25 @@ def school_result_rows(conn: sqlite3.Connection, school_id: int, status_filter: 
     rows: list[dict[str, Any]] = []
     for participant in participants:
         assessment = latest_assessment(conn, participant["id"])
-        state = assessment["status"] if assessment else "belum_mulai"
+        if assessment is None:
+            continue
+        state = assessment["status"]
         if status_filter != "all" and state != status_filter:
             continue
-        result = compute_assessment_result(conn, assessment) if assessment else None
+        if not include_active:
+            exam_status = assessment_exam_status(conn, assessment["id"])
+            if state != "locked" or exam_status not in {None, "archived"}:
+                continue
+        result = compute_assessment_result(conn, assessment)
         rows.append(
             {
                 "school_nama": school["nama"] if school else "",
                 "scheme_kode": school["scheme_kode"] if school else db.DEFAULT_SCHEME_KODE,
                 "participant": dict(participant),
-                "assessment_id": assessment["id"] if assessment else None,
+                "assessment_id": assessment["id"],
                 "status": state,
-                "locked_at": assessment["locked_at"] if assessment else None,
-                "instrument_version": assessment["instrument_version"] if assessment else None,
+                "locked_at": assessment["locked_at"],
+                "instrument_version": assessment["instrument_version"],
                 "result": result,
             }
         )
@@ -765,7 +803,7 @@ def _register_scheme_and_recap_routes(app: FastAPI, auth_ctx: Any) -> None:
         ).fetchall()
         all_rows: list[dict[str, Any]] = []
         for s in schools:
-            all_rows.extend(school_result_rows(conn, s["id"], "all"))
+            all_rows.extend(school_result_rows(conn, s["id"], "all", include_active=True))
         snapshot = db.get_snapshot(conn, scheme_kode)
         units = snapshot.get("units", [])
         stamp = date.today().strftime("%Y%m%d")
@@ -934,8 +972,52 @@ def _register_school_routes(app: FastAPI, auth_ctx: Any) -> None:
 
 def _register_participant_and_result_routes(app: FastAPI, auth_ctx: Any) -> None:
     @app.get("/api/schools/{school_id}/participants")
-    def list_participants(school_id: int, ctx: tuple = Depends(auth_ctx)):
+    def list_participants(
+        school_id: int,
+        exam_id: int | None = None,
+        group_label: str | None = None,
+        enrollment_status: str | None = None,
+        ctx: tuple = Depends(auth_ctx),
+    ):
         conn, _ = ctx
+        if conn.execute("SELECT 1 FROM school WHERE id=?", (school_id,)).fetchone() is None:
+            fail(404, "school_not_found")
+        if exam_id is not None:
+            exam = conn.execute("SELECT id FROM exam WHERE id=?", (exam_id,)).fetchone()
+            if exam is None or conn.execute(
+                "SELECT 1 FROM exam_school WHERE exam_id=? AND school_id=?",
+                (exam_id, school_id),
+            ).fetchone() is None:
+                fail(404, "exam_school_not_found")
+            clauses = ["ee.exam_id=?", "ee.school_id=?"]
+            values: list[Any] = [exam_id, school_id]
+            if group_label:
+                clauses.append("ee.group_label=?")
+                values.append(normalize_space(group_label))
+            if enrollment_status:
+                if enrollment_status not in {"enrolled", "withdrawn"}:
+                    fail(400, "invalid_enrollment_status")
+                clauses.append("ee.status=?")
+                values.append(enrollment_status)
+            rows = conn.execute(
+                f"""SELECT ee.id AS enrollment_id, ee.participant_id, ee.exam_id, ee.school_id,
+                           ee.scheme_kode, ee.group_label, ee.snapshot_number AS nomor,
+                           ee.snapshot_name AS nama, ee.snapshot_class AS kelas,
+                           ee.status AS enrollment_status, a.id AS assessment_id,
+                           a.status AS assessment_status, a.locked_at, a.result_json
+                    FROM exam_enrollment ee
+                    LEFT JOIN assessment a ON a.exam_enrollment_id=ee.id
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY ee.group_label, ee.snapshot_number, ee.id""",
+                values,
+            ).fetchall()
+            data = []
+            for row in rows:
+                item = dict(row)
+                item["result"] = json.loads(row["result_json"]) if row["result_json"] else None
+                item.pop("result_json", None)
+                data.append(item)
+            return {"data": data, "meta": {"total": len(data), "exam_id": exam_id}}
         rows = conn.execute(
             "SELECT * FROM participant WHERE school_id = ? ORDER BY nomor", (school_id,)
         ).fetchall()
@@ -1010,6 +1092,10 @@ def _register_participant_and_result_routes(app: FastAPI, auth_ctx: Any) -> None
         ).fetchone()
         if row is None:
             fail(404, "participant_not_found")
+        if conn.execute(
+            "SELECT 1 FROM exam_enrollment WHERE participant_id = ? LIMIT 1", (participant_id,)
+        ).fetchone():
+            fail(409, "participant_has_exam_history")
         if latest_assessment(conn, participant_id) is not None:
             fail(409, "participant_has_assessment")
         conn.execute("DELETE FROM participant WHERE id = ?", (participant_id,))
@@ -1081,7 +1167,7 @@ def _register_participant_and_result_routes(app: FastAPI, auth_ctx: Any) -> None
             fail(404, "school_not_found")
         if format not in {"csv", "xlsx"}:
             fail(400, "invalid_format")
-        rows = school_result_rows(conn, school_id, "all")
+        rows = school_result_rows(conn, school_id, "all", include_active=True)
         scheme_kode = school["scheme_kode"] or db.DEFAULT_SCHEME_KODE
         snapshot = db.get_snapshot(conn, scheme_kode)
         units = snapshot.get("units", [])
@@ -1100,6 +1186,8 @@ def apply_score_item(
     fallback_ts: str | None = None,
 ) -> str:
     """Terapkan satu skor indikator. Kembalikan 'synced', 'skipped', atau kode error."""
+    if assessment_exam_status(conn, assessment["id"]) == "archived":
+        return "exam_archived"
     if assessment["status"] == "locked":
         return "assessment_locked"
     snapshot = json.loads(assessment["instrument_json"])
@@ -1160,26 +1248,39 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
         ).fetchone()
         if participant is None:
             fail(404, "participant_not_found")
-        existing = latest_assessment(conn, body.participant_id)
+        enrollment = conn.execute(
+            """SELECT ee.*, e.status AS exam_status FROM exam_enrollment ee
+               JOIN exam e ON e.id=ee.exam_id WHERE ee.id=?""",
+            (body.enrollment_id,),
+        ).fetchone()
+        if enrollment is None or enrollment["participant_id"] != body.participant_id:
+            fail(400, "enrollment_participant_mismatch")
+        if enrollment["status"] != "enrolled":
+            fail(409, "enrollment_not_active")
+        if body.scheme_kode and body.scheme_kode != enrollment["scheme_kode"]:
+            fail(400, "enrollment_scheme_mismatch")
+        existing = conn.execute(
+            "SELECT * FROM assessment WHERE exam_enrollment_id = ?", (body.enrollment_id,)
+        ).fetchone()
         if existing is not None:
             return assessment_full(conn, existing)
-        school = conn.execute(
-            "SELECT * FROM school WHERE id = ?", (participant["school_id"],)
-        ).fetchone()
-        scheme_kode = body.scheme_kode or (school["scheme_kode"] if school else None) or db.DEFAULT_SCHEME_KODE
+        if enrollment["exam_status"] != "active":
+            fail(409, "exam_not_active", status=enrollment["exam_status"])
+        scheme_kode = enrollment["scheme_kode"]
         snapshot = db.get_snapshot(conn, scheme_kode)
         version = int(snapshot.get("version", db.instrument_version(conn, scheme_kode)))
         now = db.utcnow()
         cur = conn.execute(
             """
             INSERT INTO assessment
-                (participant_id, scheme_kode, instrument_version, instrument_json, status, started_at,
+                (participant_id, scheme_kode, exam_enrollment_id, instrument_version, instrument_json, status, started_at,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'in_progress', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'in_progress', ?, ?, ?)
             """,
             (
                 body.participant_id,
                 scheme_kode,
+                body.enrollment_id,
                 version,
                 json.dumps(snapshot, ensure_ascii=False),
                 now,
@@ -1204,7 +1305,7 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
             "assessment_start",
             "assessment",
             assessment_id,
-            new_value={"participant_id": body.participant_id, "scheme_kode": scheme_kode, "version": version},
+            new_value={"participant_id": body.participant_id, "scheme_kode": scheme_kode, "enrollment_id": body.enrollment_id, "version": version},
         )
         conn.commit()
         row = conn.execute("SELECT * FROM assessment WHERE id = ?", (assessment_id,)).fetchone()
@@ -1224,6 +1325,8 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
         assessment = conn.execute("SELECT * FROM assessment WHERE id = ?", (assessment_id,)).fetchone()
         if assessment is None:
             fail(404, "assessment_not_found")
+        if assessment_exam_status(conn, assessment_id) == "archived":
+            fail(409, "exam_archived")
         if assessment["status"] == "locked":
             fail(409, "assessment_locked")
         snapshot = json.loads(assessment["instrument_json"])
@@ -1257,6 +1360,8 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
         assessment = conn.execute("SELECT * FROM assessment WHERE id = ?", (assessment_id,)).fetchone()
         if assessment is None:
             fail(404, "assessment_not_found")
+        if assessment_exam_status(conn, assessment_id) == "archived":
+            fail(409, "exam_archived")
         result = compute_assessment_result(conn, assessment)
         if assessment["status"] == "locked":
             return {"status": "locked", "locked_at": assessment["locked_at"], "result": result}
@@ -1294,6 +1399,8 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
         assessment = conn.execute("SELECT * FROM assessment WHERE id = ?", (assessment_id,)).fetchone()
         if assessment is None:
             fail(404, "assessment_not_found")
+        if assessment_exam_status(conn, assessment_id) == "archived":
+            fail(409, "exam_archived")
         if assessment["status"] != "locked":
             fail(400, "assessment_not_locked")
         reason = body.reason.strip()
@@ -1802,12 +1909,18 @@ def _register_sync_and_admin_routes(app: FastAPI, active_db_path: Path, db_dep: 
     @app.post("/api/sync/sheets")
     def sync_sheets(body: SheetsBody, ctx: tuple = Depends(auth_ctx)):
         conn, user = ctx
-        info = sheets.sync_schools(body.school_id)
+        if body.exam_id is not None and body.school_id is not None:
+            if conn.execute(
+                "SELECT 1 FROM exam_school WHERE exam_id=? AND school_id=?",
+                (body.exam_id, body.school_id),
+            ).fetchone() is None:
+                fail(400, "school_not_associated")
+        info = sheets.sync_schools(body.school_id, body.exam_id, active_db_path)
         status = info.get("status", "error")
         db.record_outbox(
             conn,
             "sheets",
-            f"sheets:{body.school_id or 'all'}:{db.utcnow()}",
+            f"sheets:{body.exam_id or 'legacy'}:{body.school_id or 'all'}:{db.utcnow()}",
             info,
             status="done" if status in {"ok", "disabled"} else "failed",
             error=info.get("message"),
@@ -1819,8 +1932,8 @@ def _register_sync_and_admin_routes(app: FastAPI, active_db_path: Path, db_dep: 
             user["id"],
             "sheets_sync",
             "school",
-            body.school_id or "all",
-            new_value={"status": status, "rows": info.get("rows_upserted", 0)},
+            body.exam_id or body.school_id or "all",
+            new_value={"status": status, "rows": info.get("rows_upserted", 0), "exam_id": body.exam_id},
         )
         conn.commit()
         if status == "error":
@@ -1971,6 +2084,7 @@ def create_app(db_path: str | os.PathLike[str] | None = None) -> FastAPI:
     _register_auth_routes(app, db_dep, auth_ctx)
     _register_scheme_and_recap_routes(app, auth_ctx)
     _register_school_routes(app, auth_ctx)
+    exams.register_routes(app, auth_ctx)
     _register_assessment_routes(app, auth_ctx)
     _register_config_routes(app, auth_ctx)
     _register_sync_and_admin_routes(app, active_db_path, db_dep, auth_ctx)

@@ -139,6 +139,95 @@ def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list
     return headers, rows
 
 
+def _rows_for_exam_school(
+    conn, exam_id: int, school_id: int, config: dict[str, Any]
+) -> tuple[list[str], list[list[Any]]]:
+    exam = conn.execute("SELECT * FROM exam WHERE id=?", (exam_id,)).fetchone()
+    school = conn.execute("SELECT * FROM school WHERE id=?", (school_id,)).fetchone()
+    if exam is None or school is None:
+        raise ValueError("Ujian atau sekolah tidak ditemukan")
+    scheme_kode = school["scheme_kode"]
+    snapshot = db.get_snapshot(conn, scheme_kode)
+    unit_codes = [unit["kode"] for unit in snapshot.get("units", [])]
+    headers = [
+        "Idempotency Key",
+        "Exam ID",
+        "Judul Ujian",
+        "Tahun",
+        "Sekolah",
+        "Nomor",
+        "Nama",
+        "Kelas",
+        "Kelompok",
+        "Skema",
+        "Status Pendaftaran",
+        "Status Asesmen",
+        *unit_codes,
+        "Unit Lulus",
+        "Unit Tidak Lulus",
+        "Sub Kompetensi",
+        "Predikat",
+        "Outcome",
+        "Locked At",
+    ]
+    enrollments = conn.execute(
+        """SELECT ee.*, a.id AS assessment_id, a.participant_id AS assessment_participant_id,
+                  a.status AS assessment_status, a.instrument_json, a.result_json, a.locked_at
+           FROM exam_enrollment ee
+           LEFT JOIN assessment a ON a.exam_enrollment_id=ee.id
+           WHERE ee.exam_id=? AND ee.school_id=? ORDER BY ee.snapshot_number, ee.id""",
+        (exam_id, school_id),
+    ).fetchall()
+    rows: list[list[Any]] = []
+    for enrollment in enrollments:
+        assessment = None
+        result = None
+        if enrollment["assessment_id"] is not None:
+            assessment = {
+                "id": enrollment["assessment_id"],
+                "participant_id": enrollment["assessment_participant_id"],
+                "status": enrollment["assessment_status"],
+                "instrument_json": enrollment["instrument_json"],
+                "result_json": enrollment["result_json"],
+                "locked_at": enrollment["locked_at"],
+            }
+            result = _result_for(conn, assessment, config)
+        percent_by_code = {
+            unit["kode"]: unit.get("percent", "")
+            for unit in (result or {}).get("unit_results", [])
+        }
+        selected_sub = (result or {}).get("selected_sub")
+        sub_text = (
+            selected_sub["judul"]
+            if selected_sub
+            else "; ".join(sub["judul"] for sub in (result or {}).get("sub_fulfilled", []))
+        )
+        rows.append(
+            [
+                f"{exam_id}:{enrollment['id']}",
+                exam_id,
+                exam["title"],
+                exam["year"],
+                enrollment["snapshot_school_name"],
+                enrollment["snapshot_number"],
+                enrollment["snapshot_name"],
+                enrollment["snapshot_class"],
+                enrollment["group_label"],
+                enrollment["scheme_kode"],
+                enrollment["status"],
+                (assessment or {}).get("status", "belum_mulai"),
+                *[percent_by_code.get(code, "") for code in unit_codes],
+                ", ".join((result or {}).get("unit_passed", [])),
+                ", ".join((result or {}).get("unit_failed", [])),
+                sub_text,
+                (result or {}).get("predicate") or "",
+                (result or {}).get("outcome") or "",
+                enrollment["locked_at"] or "",
+            ]
+        )
+    return headers, rows
+
+
 def _build_service():
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
@@ -159,7 +248,11 @@ def _ensure_tab(service, spreadsheet_id: str, tab: str, known_tabs: dict[str, in
     known_tabs[tab] = -1
 
 
-def sync_schools(school_id: int | None = None) -> dict[str, Any]:
+def sync_schools(
+    school_id: int | None = None,
+    exam_id: int | None = None,
+    db_path: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
     """Push hasil sekolah ke Sheets. Tidak pernah melempar error ke caller."""
     state = status()
     if not state["enabled"]:
@@ -170,10 +263,28 @@ def sync_schools(school_id: int | None = None) -> dict[str, Any]:
             "message": state["reason"],
         }
 
-    conn = db.connect()
+    conn = db.connect(db_path)
     try:
         config = db.all_config(conn)
-        if school_id is not None:
+        if exam_id is not None:
+            exam = conn.execute("SELECT * FROM exam WHERE id=?", (exam_id,)).fetchone()
+            if exam is None:
+                return {"status": "error", "synced_schools": 0, "rows_upserted": 0, "message": "Ujian tidak ditemukan"}
+            if school_id is not None:
+                schools = conn.execute(
+                    """SELECT s.* FROM school s JOIN exam_school es ON es.school_id=s.id
+                       WHERE es.exam_id=? AND s.id=?""",
+                    (exam_id, school_id),
+                ).fetchall()
+                if not schools:
+                    return {"status": "error", "synced_schools": 0, "rows_upserted": 0, "message": "Sekolah tidak terdaftar pada ujian"}
+            else:
+                schools = conn.execute(
+                    """SELECT s.* FROM school s JOIN exam_school es ON es.school_id=s.id
+                       WHERE es.exam_id=? ORDER BY s.nama""",
+                    (exam_id,),
+                ).fetchall()
+        elif school_id is not None:
             schools = conn.execute("SELECT * FROM school WHERE id = ?", (school_id,)).fetchall()
         else:
             schools = conn.execute("SELECT * FROM school ORDER BY nama").fetchall()
@@ -196,15 +307,19 @@ def sync_schools(school_id: int | None = None) -> dict[str, Any]:
         synced_schools = 0
         rows_upserted = 0
         for school in schools:
-            tab = sanitize_tab_name(school["nama"], "Sekolah")
+            tab_name = f"{exam['year']}_{exam['title']}_{school['nama']}" if exam_id is not None else school["nama"]
+            tab = sanitize_tab_name(tab_name, "Ujian" if exam_id is not None else "Sekolah")
             if tab in used_tabs:
-                tab = f"{tab[:94]}_{school['id']}"
+                tab = f"{tab[:85]}_{exam_id or 'legacy'}_{school['id']}"
                 while tab in used_tabs:
-                    tab = f"{tab[:90]}_{school['id']}_x"
+                    tab = f"{tab[:80]}_{exam_id or 'legacy'}_{school['id']}_x"
             used_tabs.add(tab)
             _ensure_tab(service, spreadsheet_id, tab, known_tabs)
 
-            headers, rows = _rows_for_school(conn, school["id"], config)
+            if exam_id is not None:
+                headers, rows = _rows_for_exam_school(conn, exam_id, school["id"], config)
+            else:
+                headers, rows = _rows_for_school(conn, school["id"], config)
             existing_values = (
                 service.spreadsheets()
                 .values()
@@ -242,6 +357,7 @@ def sync_schools(school_id: int | None = None) -> dict[str, Any]:
             "status": "ok",
             "synced_schools": synced_schools,
             "rows_upserted": rows_upserted,
+            "exam_id": exam_id,
             "message": None,
         }
     except Exception as exc:  # jangan crash: kembalikan status error yang aman

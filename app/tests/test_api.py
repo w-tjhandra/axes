@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import zipfile
 
 import pyotp
 import pytest
@@ -66,7 +67,45 @@ def make_participant(client: TestClient, school_id: int, nomor: str = "01", nama
 
 
 def start_assessment(client: TestClient, participant_id: int) -> dict:
-    response = client.post("/api/assessments", json={"participant_id": participant_id}, headers=H)
+    participant = None
+    for school in client.get("/api/schools").json()["data"]:
+        participants = client.get(f"/api/schools/{school['id']}/participants").json()["data"]
+        participant = next((row for row in participants if row["id"] == participant_id), None)
+        if participant:
+            break
+    assert participant is not None
+    exam_count = client.get("/api/exams").json()["meta"]["total"]
+    exam = client.post(
+        "/api/exams",
+        json={
+            "title": f"Uji otomatis {exam_count + 1}",
+            "year": 2030,
+            "school_ids": [participant["school_id"]],
+            "scheme_kodes": [school["scheme_kode"]],
+        },
+        headers=H,
+    )
+    assert exam.status_code == 201, exam.text
+    exam_id = exam.json()["id"]
+    assert client.post(f"/api/exams/{exam_id}/activate", headers=H).status_code == 200
+    enrollment = client.post(
+        f"/api/exams/{exam_id}/enrollments",
+        json={
+            "participant_id": participant_id,
+            "scheme_kode": school["scheme_kode"],
+            "group_label": participant.get("kelas", ""),
+        },
+        headers=H,
+    )
+    assert enrollment.status_code == 201, enrollment.text
+    response = client.post(
+        "/api/assessments",
+        json={
+            "participant_id": participant_id,
+            "enrollment_id": enrollment.json()["id"],
+        },
+        headers=H,
+    )
     assert response.status_code in (200, 201), response.text
     return response.json()
 
@@ -79,6 +118,44 @@ def all_indicator_items(payload: dict, value: int = 3) -> list[dict]:
     ]
 
 
+def certificate_docx(placeholders: list[str] | None = None) -> bytes:
+    names = placeholders or [
+        "participant_name",
+        "participant_number",
+        "school_name",
+        "exam_title",
+        "exam_year",
+        "scheme_name",
+        "outcome_label",
+        "certificate_number",
+        "issued_date",
+    ]
+    text = " · ".join(f"{{{{{name}}}}}" for name in names)
+    parts = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            "</Types>"
+        ),
+        "_rels/.rels": (
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            "</Relationships>"
+        ),
+        "word/document.xml": (
+            '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            f"<w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"
+        ),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, value in parts.items():
+            archive.writestr(name, value)
+    return buffer.getvalue()
+
+
 def test_health_dan_seed(client):
     response = client.get("/api/health")
     assert response.status_code == 200
@@ -86,6 +163,236 @@ def test_health_dan_seed(client):
     assert data["status"] == "ok"
     assert data["units"] == 13
     assert data["indicators"] == 61
+
+
+def test_exam_roster_dashboard_archive_and_export(client):
+    setup_login(client)
+    school = make_school(client)
+    peserta = [
+        make_participant(client, school["id"], f"{index:02d}", f"Peserta {index}")
+        for index in range(1, 5)
+    ]
+    body = {
+        "title": "Ujian Tahunan",
+        "year": 2034,
+        "starts_on": "2034-05-01",
+        "ends_on": "2034-05-03",
+        "school_ids": [school["id"]],
+        "scheme_kodes": [school["scheme_kode"]],
+    }
+    created = client.post("/api/exams", json=body, headers=H)
+    assert created.status_code == 201, created.text
+    exam = created.json()
+    assert exam["status"] == "draft"
+
+    duplicate = client.post("/api/exams", json=body, headers=H)
+    assert duplicate.status_code == 409
+    next_year = client.post("/api/exams", json={**body, "year": 2035}, headers=H)
+    assert next_year.status_code == 201
+
+    enrollments = []
+    for participant in peserta:
+        response = client.post(
+            f"/api/exams/{exam['id']}/enrollments",
+            json={
+                "participant_id": participant["id"],
+                "scheme_kode": school["scheme_kode"],
+                "group_label": "XII TKJ 1",
+            },
+            headers=H,
+        )
+        assert response.status_code == 201, response.text
+        enrollments.append(response.json())
+
+    duplicate_enrollment = client.post(
+        f"/api/exams/{exam['id']}/enrollments",
+        json={
+            "participant_id": peserta[0]["id"],
+            "scheme_kode": school["scheme_kode"],
+            "group_label": "XII TKJ 1",
+        },
+        headers=H,
+    )
+    assert duplicate_enrollment.status_code == 409
+
+    before_active = client.post(
+        "/api/assessments",
+        json={"participant_id": peserta[0]["id"], "enrollment_id": enrollments[0]["id"]},
+        headers=H,
+    )
+    assert before_active.status_code == 409
+    assert client.post(f"/api/exams/{exam['id']}/activate", headers=H).status_code == 200
+
+    first = client.post(
+        "/api/assessments",
+        json={"participant_id": peserta[0]["id"], "enrollment_id": enrollments[0]["id"]},
+        headers=H,
+    )
+    second = client.post(
+        "/api/assessments",
+        json={"participant_id": peserta[1]["id"], "enrollment_id": enrollments[1]["id"]},
+        headers=H,
+    )
+    assert first.status_code == second.status_code == 201
+    first_payload, second_payload = first.json(), second.json()
+    assert first_payload["assessment"]["exam"]["exam_title"] == "Ujian Tahunan"
+    assert first_payload["assessment"]["exam"]["exam_year"] == 2034
+
+    for payload, score in ((first_payload, 3), (second_payload, 0)):
+        saved = client.patch(
+            f"/api/assessments/{payload['assessment']['id']}/scores",
+            json={"items": all_indicator_items(payload, score)},
+            headers=H,
+        )
+        assert saved.status_code == 200, saved.text
+        locked = client.post(
+            f"/api/assessments/{payload['assessment']['id']}/lock",
+            json={"confirm_empty": False},
+            headers=H,
+        )
+        assert locked.status_code == 200, locked.text
+
+    withdrawn = client.post(
+        f"/api/exams/{exam['id']}/enrollments/{enrollments[3]['id']}/withdraw",
+        headers=H,
+    )
+    assert withdrawn.status_code == 200
+    dashboard = client.get(f"/api/exams/dashboard?exam_id={exam['id']}").json()["stats"]
+    assert dashboard["total"] == 3
+    assert dashboard["assessed"] == 2
+    assert dashboard["passed"] == 1
+    assert dashboard["failed"] == 1
+    assert dashboard["pass_percent"] == dashboard["fail_percent"] == 50
+    assert dashboard["not_started"] == 1
+    assert dashboard["completion_percent"] == 66.67
+
+    assert client.post(f"/api/exams/{exam['id']}/close", headers=H).status_code == 200
+    archived = client.post(f"/api/exams/{exam['id']}/archive", headers=H)
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["status"] == "archived"
+
+    locked_id = first_payload["assessment"]["id"]
+    mutation = client.patch(
+        f"/api/assessments/{locked_id}/scores",
+        json={"items": [{"indicator_kode": "IND-001", "value": 2}]},
+        headers=H,
+    )
+    assert mutation.status_code == 409
+    assert mutation.json()["error"] == "exam_archived"
+    archived_list = client.get("/api/archives/exams").json()["data"]
+    assert any(item["id"] == exam["id"] for item in archived_list)
+    export = client.get(f"/api/exams/{exam['id']}/export?format=csv")
+    assert export.status_code == 200
+    assert "Ujian Tahunan" in export.text
+
+
+def test_certificate_template_preview_issue_and_reissue(client):
+    setup_login(client)
+    school = make_school(client)
+    participant = make_participant(client, school["id"])
+    exam = client.post(
+        "/api/exams",
+        json={
+            "title": "Ujian Sertifikat",
+            "year": 2036,
+            "school_ids": [school["id"]],
+            "scheme_kodes": [school["scheme_kode"]],
+        },
+        headers=H,
+    ).json()
+    enrollment = client.post(
+        f"/api/exams/{exam['id']}/enrollments",
+        json={
+            "participant_id": participant["id"],
+            "scheme_kode": school["scheme_kode"],
+            "group_label": "XII TKJ",
+        },
+        headers=H,
+    ).json()
+    assert client.post(f"/api/exams/{exam['id']}/activate", headers=H).status_code == 200
+    assessment = client.post(
+        "/api/assessments",
+        json={"participant_id": participant["id"], "enrollment_id": enrollment["id"]},
+        headers=H,
+    ).json()
+    assessment_id = assessment["assessment"]["id"]
+    assert client.patch(
+        f"/api/assessments/{assessment_id}/scores",
+        json={"items": all_indicator_items(assessment, 3)},
+        headers=H,
+    ).status_code == 200
+    assert client.post(
+        f"/api/assessments/{assessment_id}/lock", json={}, headers=H
+    ).status_code == 200
+
+    invalid = client.post(
+        "/api/certificate-templates",
+        data={"exam_id": str(exam["id"])},
+        files={"file": ("bad.docx", b"not a zip", "application/octet-stream")},
+        headers=H,
+    )
+    assert invalid.status_code == 400
+
+    missing = client.post(
+        "/api/certificate-templates",
+        data={"exam_id": str(exam["id"])},
+        files={"file": ("missing.docx", certificate_docx(["participant_name"]), "application/octet-stream")},
+        headers=H,
+    )
+    assert missing.status_code == 400
+    assert missing.json()["error"] == "required_placeholders_missing"
+
+    uploaded = client.post(
+        "/api/certificate-templates",
+        data={"exam_id": str(exam["id"])},
+        files={"file": ("template.docx", certificate_docx(), "application/octet-stream")},
+        headers=H,
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    template_id = uploaded.json()["id"]
+    activation = client.post(
+        f"/api/certificate-templates/{template_id}/activate", headers=H
+    )
+    assert activation.status_code == 409
+    preview = client.post(
+        f"/api/certificate-templates/{template_id}/preview", headers=H
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.headers["content-type"] == "application/pdf"
+    assert preview.content.startswith(b"%PDF-")
+    assert client.post(
+        f"/api/certificate-templates/{template_id}/activate", headers=H
+    ).status_code == 200
+
+    first_issue = client.post(
+        f"/api/enrollments/{enrollment['id']}/certificate",
+        json={"template_id": template_id},
+        headers=H,
+    )
+    assert first_issue.status_code == 201, first_issue.text
+    first = first_issue.json()
+    assert first["certificate_number"].startswith("AA-2036-JNT-SMK-")
+    download = client.get(f"/api/certificates/{first['id']}/download")
+    assert download.status_code == 200
+    assert download.content.startswith(b"%PDF-")
+
+    repeat = client.post(
+        f"/api/enrollments/{enrollment['id']}/certificate",
+        json={"template_id": template_id},
+        headers=H,
+    )
+    assert repeat.status_code == 201
+    assert repeat.json()["id"] == first["id"]
+    assert repeat.json()["already_issued"] is True
+    second_issue = client.post(
+        f"/api/enrollments/{enrollment['id']}/certificate",
+        json={"template_id": template_id, "reissue": True},
+        headers=H,
+    )
+    assert second_issue.status_code == 201, second_issue.text
+    assert second_issue.json()["certificate_number"] != first["certificate_number"]
+    issues = client.get(f"/api/enrollments/{enrollment['id']}/certificates").json()["data"]
+    assert [issue["status"] for issue in issues] == ["active", "superseded"]
 
 
 def test_setup_login_totp_dan_csrf(client):
@@ -286,19 +593,18 @@ def test_hasil_sekolah_dan_ekspor_csv_xlsx(client):
 
     response = client.get(f"/api/schools/{school['id']}/results")
     assert response.status_code == 200
-    data = response.json()["data"]
-    assert len(data) == 1
-    assert data[0]["result"]["outcome"] == "kompeten_penuh"
+    assert response.json()["data"] == []
 
-    response = client.get(f"/api/schools/{school['id']}/export?format=csv")
+    exam_id = payload["assessment"]["exam"]["exam_id"]
+    response = client.get(f"/api/exams/{exam_id}/export?format=csv")
     assert response.status_code == 200
     assert response.content.startswith(b"\xef\xbb\xbf")
-    assert b"nomor,nama,kelas" in response.content
+    assert b"judul_ujian,tahun,sekolah,nomor,nama" in response.content
 
-    response = client.get(f"/api/schools/{school['id']}/export?format=xlsx")
+    response = client.get(f"/api/exams/{exam_id}/export?format=xlsx")
     assert response.status_code == 200
     workbook = load_workbook(io.BytesIO(response.content))
-    assert workbook.sheetnames == ["Ringkasan", "Detail Unit", "Sub Kompetensi"]
+    assert workbook.sheetnames == ["Roster & Hasil"]
 
 
 def test_config_version_dan_snapshot_assessment(client):
@@ -493,4 +799,3 @@ def test_recap_summary_dan_proteksi_csv_formula_injection(client):
     assert xlsx_res.status_code == 200
     wb = load_workbook(io.BytesIO(xlsx_res.content))
     assert wb.sheetnames == ["Ringkasan", "Detail Unit", "Sub Kompetensi"]
-

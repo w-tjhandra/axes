@@ -180,11 +180,41 @@ Lihat `.env.example`. Ringkasan:
 | `HSTS` | mati | `1` untuk kirim header HSTS |
 | `BACKUP_DIR` | `./backups` | Direktori backup |
 | `BACKUP_KEY` | kosong | Enkripsi backup |
+| `CERTIFICATE_DIR` | `data/certificates` di sebelah database | Penyimpanan privat DOCX/PDF; jangan arahkan ke `static/` |
+| `CERTIFICATE_CONVERTER` | `libreoffice` | Executable DOCX→PDF |
 | `GOOGLE_SHEETS_ID` | kosong | Spreadsheet tujuan |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | kosong | Kredensial Sheets |
 | `SYNC_API_KEY` | kosong | API key sync skor |
 
-## 9. Contoh Caddy (HTTPS)
+## 9. Ujian tahunan, arsip, dan sertifikat
+
+- Buat periode pada menu **Ujian** dengan judul+tahun, sekolah, dan skema.
+  Sekolah tetap menjadi data induk; roster dan snapshot identitas tersimpan
+  per ujian. CSV roster menerima `nomor,nama` dan kolom opsional `kelas,kelompok`.
+- Ujian harus berstatus aktif sebelum asesmen baru dapat dimulai. Menutup
+  pendaftaran tetap mengizinkan asesmen yang berjalan diselesaikan. Arsip
+  ditolak bila masih ada asesmen berjalan dan setelah berhasil menjadi
+  hanya-baca, termasuk untuk sync skor offline yang tertunda.
+- Dashboard memakai hasil terkunci sebagai denominator persentase lulus/tidak
+  lulus; asesi withdrawn tidak masuk total. Dashboard default ke ujian aktif
+  terbaru dan dapat difilter.
+- Template sertifikat harus DOCX (maksimal 10 MiB) dan memiliki placeholder
+  wajib: `participant_name`, `participant_number`, `school_name`, `exam_title`,
+  `exam_year`, `scheme_name`, `outcome_label`, `certificate_number`, dan
+  `issued_date`. Placeholder opsional: `participant_class`, `exam_date`,
+  `predicate`. Template wajib dipreview sebelum diaktifkan.
+- Konversi memerlukan LibreOffice dan `bubblewrap` (`bwrap`) dengan dukungan
+  network/PID namespace. Tanpa keduanya, status konverter menyatakan fitur
+  tidak siap dan aplikasi menampilkan error eksplisit. Maksimal PDF 25 MiB.
+  DOCX/PDF disimpan di luar direktori publik dengan permission privat.
+- Backup menyertakan database dan, bila ada, arsip pendamping
+  `ukk_*.documents.zip` (atau `.zip.enc` jika `BACKUP_KEY` diset). Untuk
+  pemulihan lengkap, pulihkan database dan ekstrak arsip dokumen ke direktori
+  `CERTIFICATE_DIR` yang sama. Jangan memublikasikan backup/sertifikat.
+- Sertifikat yang dihasilkan adalah dokumen internal AeroAssess, bukan
+  sertifikat resmi LSP/BNSP tanpa validasi kewenangan dan materi penerbit.
+
+## 10. Contoh Caddy (HTTPS)
 
 ```caddyfile
 ukk.example.com {
@@ -197,7 +227,7 @@ Jalankan aplikasi dengan `HOST=127.0.0.1 COOKIE_SECURE=1 TRUST_PROXY=1 HSTS=1
 ./run.sh`, lalu `caddy run`. Caddy menangani TLS; aplikasi tidak perlu
 membuka port ke publik.
 
-## 10. Tes
+## 11. Tes
 
 ```bash
 cd app
@@ -206,13 +236,15 @@ cd app
 
 Tes mencakup aturan perhitungan murni, seed 13 unit/61 indikator, autentikasi
 TOTP/CSRF, CRUD sekolah/peserta, impor CSV, alur skor–kunci–buka kunci, ekspor
-CSV/XLSX, versioning config/snapshot, sync disabled-safe, dan backup.
+CSV/XLSX, versioning config/snapshot, sync disabled-safe, backup, lifecycle
+ujian/roster/arsip/statistik, dan preview/penerbitan sertifikat DOCX→PDF.
 
-## 11. Struktur
+## 12. Struktur
 
 ```
 app/
   main.py          API FastAPI, keamanan, ekspor, config
+  exams.py         ujian, roster, arsip, template, sertifikat
   rules.py         aturan hitung 5.4/5.5/5.6 (murni)
   seed_data.py     13 unit, 61 indikator, 5 sub kompetensi
   db.py            skema SQLite, WAL, snapshot, audit

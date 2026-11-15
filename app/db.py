@@ -219,6 +219,82 @@ CREATE TABLE IF NOT EXISTS session (
   last_seen TEXT
 );
 
+CREATE TABLE IF NOT EXISTS exam (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  year INTEGER,
+  starts_on TEXT,
+  ends_on TEXT,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'active', 'closed', 'archived')),
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  archived_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_title_year
+  ON exam(lower(trim(title)), year) WHERE year IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS exam_school (
+  exam_id INTEGER NOT NULL REFERENCES exam(id) ON DELETE RESTRICT,
+  school_id INTEGER NOT NULL REFERENCES school(id) ON DELETE RESTRICT,
+  PRIMARY KEY (exam_id, school_id)
+);
+
+CREATE TABLE IF NOT EXISTS exam_scheme (
+  exam_id INTEGER NOT NULL REFERENCES exam(id) ON DELETE RESTRICT,
+  scheme_kode TEXT NOT NULL REFERENCES scheme(kode) ON DELETE RESTRICT,
+  PRIMARY KEY (exam_id, scheme_kode)
+);
+
+CREATE TABLE IF NOT EXISTS exam_enrollment (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  exam_id INTEGER NOT NULL REFERENCES exam(id) ON DELETE RESTRICT,
+  participant_id INTEGER NOT NULL REFERENCES participant(id) ON DELETE RESTRICT,
+  school_id INTEGER NOT NULL REFERENCES school(id) ON DELETE RESTRICT,
+  scheme_kode TEXT NOT NULL REFERENCES scheme(kode) ON DELETE RESTRICT,
+  group_label TEXT NOT NULL DEFAULT '',
+  snapshot_number TEXT NOT NULL,
+  snapshot_name TEXT NOT NULL,
+  snapshot_class TEXT NOT NULL DEFAULT '',
+  snapshot_school_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'enrolled' CHECK (status IN ('enrolled', 'withdrawn')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (exam_id, participant_id, scheme_kode)
+);
+
+CREATE TABLE IF NOT EXISTS certificate_template (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  exam_id INTEGER REFERENCES exam(id) ON DELETE RESTRICT,
+  scheme_kode TEXT REFERENCES scheme(kode) ON DELETE RESTRICT,
+  version INTEGER NOT NULL,
+  original_name TEXT NOT NULL,
+  storage_key TEXT NOT NULL UNIQUE,
+  checksum TEXT NOT NULL,
+  placeholders_json TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 0,
+  previewed_at TEXT,
+  uploaded_by INTEGER NOT NULL REFERENCES user(id),
+  created_at TEXT NOT NULL,
+  CHECK (exam_id IS NOT NULL OR scheme_kode IS NOT NULL)
+);
+
+CREATE TABLE IF NOT EXISTS certificate_issue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  enrollment_id INTEGER NOT NULL REFERENCES exam_enrollment(id) ON DELETE RESTRICT,
+  assessment_id INTEGER NOT NULL REFERENCES assessment(id) ON DELETE RESTRICT,
+  template_id INTEGER NOT NULL REFERENCES certificate_template(id) ON DELETE RESTRICT,
+  certificate_number TEXT NOT NULL UNIQUE,
+  storage_key TEXT NOT NULL UNIQUE,
+  checksum TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded')),
+  supersedes_id INTEGER REFERENCES certificate_issue(id) ON DELETE RESTRICT,
+  issued_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_score_assessment ON score(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_score_pending ON score(synced) WHERE synced=0;
 CREATE INDEX IF NOT EXISTS idx_assessment_participant ON assessment(participant_id);
@@ -226,6 +302,13 @@ CREATE INDEX IF NOT EXISTS idx_participant_school ON participant(school_id);
 CREATE INDEX IF NOT EXISTS idx_sync_outbox_status ON sync_outbox(status);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_session_user ON session(user_id);
+CREATE INDEX IF NOT EXISTS idx_exam_status_year ON exam(status, year DESC);
+CREATE INDEX IF NOT EXISTS idx_exam_enrollment_exam ON exam_enrollment(exam_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_exam_enrollment_school ON exam_enrollment(school_id, exam_id);
+CREATE INDEX IF NOT EXISTS idx_certificate_issue_enrollment
+  ON certificate_issue(enrollment_id, assessment_id, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_certificate_issue_active
+  ON certificate_issue(enrollment_id, assessment_id) WHERE status = 'active';
 """
 
 
@@ -330,6 +413,30 @@ def _migrate_multi_scheme(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _migrate_annual_exams(conn: sqlite3.Connection) -> None:
+    """Add exam context without assigning historical assessments to invented exams."""
+    columns = _table_columns(conn, "assessment")
+    if "exam_enrollment_id" not in columns:
+        conn.execute(
+            "ALTER TABLE assessment ADD COLUMN exam_enrollment_id INTEGER "
+            "REFERENCES exam_enrollment(id) ON DELETE RESTRICT"
+        )
+    template_columns = _table_columns(conn, "certificate_template")
+    if "previewed_at" not in template_columns:
+        conn.execute("ALTER TABLE certificate_template ADD COLUMN previewed_at TEXT")
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_assessment_enrollment
+          ON assessment(exam_enrollment_id) WHERE exam_enrollment_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_certificate_template_scope
+          ON certificate_template(exam_id, scheme_kode, active, version DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_certificate_issue_active
+          ON certificate_issue(enrollment_id, assessment_id) WHERE status = 'active';
+        """
+    )
+    conn.commit()
+
+
 def init_db(path: str | os.PathLike[str] | None = None) -> Path:
     try:
         from .seed_data import seed
@@ -340,6 +447,7 @@ def init_db(path: str | os.PathLike[str] | None = None) -> Path:
     with open_db(db_path) as conn:
         conn.executescript(SCHEMA)
         _migrate_multi_scheme(conn)
+        _migrate_annual_exams(conn)
         seed(conn)
     return db_path
 

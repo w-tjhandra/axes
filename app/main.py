@@ -648,7 +648,7 @@ def _register_auth_routes(app: FastAPI, db_dep: Any, auth_ctx: Any) -> None:
             fail(429, "rate_limited", message="Terlalu banyak percobaan. Coba lagi dalam 1 menit.")
         limiter.hit(ip)
         user = conn.execute(
-            "SELECT * FROM user WHERE username = ?", (normalize_space(body.username),)
+            "SELECT * FROM user WHERE lower(username) = lower(?)", (normalize_space(body.username),)
         ).fetchone()
         if user is None or not auth.verify_password(body.password, user["password_hash"]):
             fail(401, "invalid_credentials")
@@ -660,7 +660,7 @@ def _register_auth_routes(app: FastAPI, db_dep: Any, auth_ctx: Any) -> None:
             value=token,
             httponly=True,
             samesite="strict",
-            secure=auth.cookie_secure(),
+            secure=auth.cookie_secure(request),
             max_age=auth.session_days() * 86400,
             path="/",
         )

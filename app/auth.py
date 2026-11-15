@@ -50,7 +50,7 @@ def verify_totp(secret: str, code: str | None) -> bool:
     code = str(code).strip().replace(" ", "")
     if not code.isdigit() or len(code) != 6:
         return False
-    return bool(pyotp.TOTP(secret).verify(code, valid_window=1))
+    return bool(pyotp.TOTP(secret).verify(code, valid_window=2))
 
 
 def _hash_token(token: str) -> str:
@@ -64,8 +64,24 @@ def session_days() -> int:
         return 7
 
 
-def cookie_secure() -> bool:
-    return os.environ.get("COOKIE_SECURE", "").lower() in {"1", "true", "yes", "on"}
+def is_https(request: Request | None) -> bool:
+    if request is None:
+        return False
+    if request.url.scheme == "https":
+        return True
+    if os.environ.get("TRUST_PROXY", "").lower() in {"1", "true", "yes"}:
+        proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        return proto == "https"
+    return False
+
+
+def cookie_secure(request: Request | None = None) -> bool:
+    enabled = os.environ.get("COOKIE_SECURE", "").lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return False
+    if request is not None and not is_https(request):
+        return False
+    return True
 
 
 def create_session(conn, user_id: int) -> str:

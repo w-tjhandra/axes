@@ -668,7 +668,34 @@ async function renderDashboard() {
   const activeSchemeObj = state.schemes.find((s) => s.kode === state.activeScheme);
   const totalSchools = state.schools.length;
   const lockedPct = totals.participants ? Math.round((totals.locked / totals.participants) * 100) : 0;
+  const inProgressPct = totals.participants ? Math.round((totals.in_progress / totals.participants) * 100) : 0;
+  const notStartedPct = totals.participants ? Math.round((totals.not_started / totals.participants) * 100) : 0;
+  const passCount = (outcomes.kompeten_penuh || 0) + (outcomes.kompeten_sub || 0) + (outcomes.kompeten_unit || 0);
+  const passPct = totals.participants ? Math.round((passCount / totals.participants) * 100) : 0;
   const exportScheme = state.activeScheme !== 'ALL' ? state.activeScheme : (state.schemes[0]?.kode || 'JNT-SMK');
+
+  const donutSegments = [
+    { label: 'Kompeten Penuh', value: outcomes.kompeten_penuh || 0, color: 'var(--success)' },
+    { label: 'Kompeten Sub', value: outcomes.kompeten_sub || 0, color: 'var(--primary)' },
+    { label: 'Kompeten Unit', value: outcomes.kompeten_unit || 0, color: 'var(--info)' },
+    { label: 'Belum Kompeten', value: outcomes.belum_kompeten || 0, color: 'var(--danger)' },
+  ];
+  const donutSum = donutSegments.reduce((acc, item) => acc + item.value, 0);
+  let donutOffset = 0;
+  const donutCircles = donutSum
+    ? donutSegments
+        .filter((item) => item.value > 0)
+        .map((item) => {
+          const pct = (item.value / donutSum) * 100;
+          const circle = `<circle cx="21" cy="21" r="15.9155" fill="transparent" stroke="${item.color}" stroke-width="5.2" stroke-dasharray="${pct.toFixed(2)} ${(100 - pct).toFixed(2)}" stroke-dashoffset="${(-donutOffset).toFixed(2)}"></circle>`;
+          donutOffset += pct;
+          return circle;
+        })
+        .join('')
+    : '';
+  const topSchools = [...state.schools]
+    .sort((a, b) => (b.participant_count || 0) - (a.participant_count || 0))
+    .slice(0, 5);
 
   document.querySelector('#view').innerHTML = `
     <!-- Hero Banner Greeting & Quick Summary -->
@@ -851,6 +878,86 @@ async function renderDashboard() {
               </div>`;
             }).join('')}
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Infografis Statistik Visual -->
+    <div class="infographic-grid">
+      <div class="card" style="margin-bottom:0">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Infografis Rasio Kelulusan</div>
+            <div class="card-sub">Proporsi kategori kompetensi dari ${fmtNumber(totals.participants)} asesi</div>
+          </div>
+          <span class="badge ${passPct >= 70 ? 'success' : 'warning'}">${passPct}% Kompeten</span>
+        </div>
+        <div class="card-body donut-card-body">
+          <div class="donut-wrap" role="img" aria-label="Grafik donat rasio kelulusan ${passPct}%">
+            <svg viewBox="0 0 42 42" class="donut-svg">
+              <circle cx="21" cy="21" r="15.9155" fill="transparent" stroke="var(--border)" stroke-width="5.2"></circle>
+              ${donutCircles}
+            </svg>
+            <div class="donut-center">
+              <strong>${passPct}%</strong>
+              <span>Kompeten</span>
+            </div>
+          </div>
+          <div class="donut-legend">
+            ${donutSegments.map((item) => {
+              const pct = totals.participants ? Math.round((item.value / totals.participants) * 100) : 0;
+              return `
+              <div class="legend-item">
+                <span class="nowrap"><span class="legend-dot" style="background:${item.color}"></span>${item.label}</span>
+                <strong class="tabular">${fmtNumber(item.value)} <span class="muted" style="font-size:0.75rem">(${pct}%)</span></strong>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:0">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Funnel Progres &amp; Top TUK</div>
+            <div class="card-sub">Status pengerjaan asesmen dan capaian institusi teratas</div>
+          </div>
+          <a class="btn small ghost" href="#/exams">Ujian &rarr;</a>
+        </div>
+        <div class="card-body">
+          <div class="funnel-list">
+            <div class="funnel-row">
+              <div class="funnel-meta"><span>Selesai &amp; Terkunci</span><strong class="tabular">${fmtNumber(totals.locked)} (${lockedPct}%)</strong></div>
+              <div class="funnel-track"><div class="funnel-fill" style="width:${lockedPct}%;background:var(--success)"></div></div>
+            </div>
+            <div class="funnel-row">
+              <div class="funnel-meta"><span>Dalam Penilaian</span><strong class="tabular">${fmtNumber(totals.in_progress)} (${inProgressPct}%)</strong></div>
+              <div class="funnel-track"><div class="funnel-fill" style="width:${inProgressPct}%;background:var(--warning)"></div></div>
+            </div>
+            <div class="funnel-row">
+              <div class="funnel-meta"><span>Belum Mulai</span><strong class="tabular">${fmtNumber(totals.not_started)} (${notStartedPct}%)</strong></div>
+              <div class="funnel-track"><div class="funnel-fill" style="width:${notStartedPct}%;background:var(--muted)"></div></div>
+            </div>
+          </div>
+          ${topSchools.length ? `
+          <div style="margin-top:1.1rem;padding-top:0.95rem;border-top:1px solid var(--border)">
+            <div class="muted" style="font-size:0.76rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.65rem">Progres TUK Teratas</div>
+            <div class="tuk-bar-list">
+              ${topSchools.map((school) => {
+                const total = school.participant_count || 0;
+                const locked = school.locked_count || 0;
+                const pct = total ? Math.round((locked / total) * 100) : 0;
+                return `
+                <div class="tuk-bar-row">
+                  <div class="tuk-bar-meta">
+                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(school.nama)}</span>
+                    <strong class="tabular nowrap">${locked}/${total} (${pct}%)</strong>
+                  </div>
+                  <div class="tuk-bar-track"><div class="tuk-bar-fill" style="width:${pct}%;background:${pct >= 70 ? 'var(--success)' : 'var(--primary)'}"></div></div>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>` : ''}
         </div>
       </div>
     </div>

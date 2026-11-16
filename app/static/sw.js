@@ -1,12 +1,12 @@
 /* Service worker: app shell offline-first, API network-first. */
-const CACHE_NAME = 'ukk-jnt-v15';
+const CACHE_NAME = 'ukk-jnt-v16';
 const APP_SHELL = [
   '/',
   '/index.html',
-  '/app.css?v=15',
-  '/app.js?v=15',
-  '/favicon.svg?v=15',
-  '/manifest.webmanifest?v=15',
+  '/app.css?v=16',
+  '/app.js?v=16',
+  '/favicon.svg?v=16',
+  '/manifest.webmanifest?v=16',
 ];
 
 self.addEventListener('install', (event) => {

@@ -2097,14 +2097,17 @@ def _run_periodic_sheets_sync(db_path: Path) -> None:
         conn.close()
 
     info = sheets.sync_schools(db_path=db_path)
-    if info.get("status") == "ok":
-        conn = db.connect(db_path)
-        try:
+    status = info.get("status")
+    if status == "skipped":
+        return
+    conn = db.connect(db_path)
+    try:
+        if status == "ok":
             db.set_config(conn, "last_sheets_sync", db.utcnow())
-            db.set_config(conn, "sheets_dirty", "0")
-            conn.commit()
-        finally:
-            conn.close()
+        db.set_config(conn, "sheets_dirty", "0")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def create_app(db_path: str | os.PathLike[str] | None = None) -> FastAPI:
@@ -2120,7 +2123,7 @@ def create_app(db_path: str | os.PathLike[str] | None = None) -> FastAPI:
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=10.0)
                         break
-                    except TimeoutError:
+                    except (asyncio.TimeoutError, TimeoutError):
                         pass
                     try:
                         await asyncio.to_thread(_run_periodic_sheets_sync, active_db_path)

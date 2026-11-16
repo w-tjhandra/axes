@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ INVALID_TAB_CHARS = re.compile(r"[\[\]:*?/\\]")
 SYSTEM_TAB_NAMES = {"", "history", "ringkasan", "config", "sheet1"}
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
+_SYNC_LOCK = threading.Lock()
 
 
 def extract_spreadsheet_id(raw: str | None) -> str:
@@ -311,11 +313,14 @@ def _rows_for_exam_school(
 
 
 def _build_service(service_account_info: dict[str, Any]):
+    import httplib2
     from google.oauth2.service_account import Credentials
+    from google_auth_httplib2 import AuthorizedHttp
     from googleapiclient.discovery import build
 
     credentials = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
-    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    authed_http = AuthorizedHttp(credentials, http=httplib2.Http(timeout=15))
+    return build("sheets", "v4", http=authed_http, cache_discovery=False)
 
 
 def _friendly_google_error(exc: Exception, email: str | None) -> str:
@@ -376,6 +381,13 @@ def sync_schools(
     db_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Push hasil sekolah ke Sheets. Tidak pernah melempar error ke caller."""
+    if not _SYNC_LOCK.acquire(blocking=False):
+        return {
+            "status": "skipped",
+            "synced_schools": 0,
+            "rows_upserted": 0,
+            "message": "Sinkronisasi Google Sheets sedang berjalan.",
+        }
     conn = db.connect(db_path)
     try:
         cfg = resolve_settings(conn=conn)
@@ -493,6 +505,7 @@ def sync_schools(
         }
     finally:
         conn.close()
+        _SYNC_LOCK.release()
 
 
 def _column_letter(index: int) -> str:

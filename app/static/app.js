@@ -2895,41 +2895,44 @@ async function flushOutbox(manual = false) {
   });
 
   let failedTotal = 0;
-  for (const [assessmentId, group] of Object.entries(groups)) {
-    try {
-      const payload = group.map((item) => ({
-        assessment_id: Number(assessmentId),
-        indicator_kode: item.indicator_kode,
-        value: item.value,
-        note: item.note,
-        client_ts: item.ts,
-      }));
-      const result = await api('/sync/scores', { method: 'POST', body: { items: payload } });
-      const failedCodes = new Set((result.failed || []).map((item) => item.indicator_kode));
-      const deleteKeys = [];
-      group.forEach((item) => {
-        if (failedCodes.has(item.indicator_kode)) {
-          failedTotal += 1;
+  try {
+    for (const [assessmentId, group] of Object.entries(groups)) {
+      try {
+        const payload = group.map((item) => ({
+          assessment_id: Number(assessmentId),
+          indicator_kode: item.indicator_kode,
+          value: item.value,
+          note: item.note,
+          client_ts: item.ts,
+        }));
+        const result = await api('/sync/scores', { method: 'POST', body: { items: payload } });
+        const failedCodes = new Set((result.failed || []).map((item) => item.indicator_kode));
+        const deleteKeys = [];
+        group.forEach((item) => {
+          if (failedCodes.has(item.indicator_kode)) {
+            failedTotal += 1;
+            state.failedKeys.add(item.indicator_kode);
+            outboxPut({ ...item, status: 'failed' });
+          } else {
+            deleteKeys.push(item.key);
+            state.pendingKeys.delete(item.indicator_kode);
+            state.failedKeys.delete(item.indicator_kode);
+          }
+          updateSyncDot(item.indicator_kode);
+        });
+        await outboxDelete(deleteKeys);
+      } catch (error) {
+        failedTotal += group.length;
+        group.forEach((item) => {
           state.failedKeys.add(item.indicator_kode);
-          outboxPut({ ...item, status: 'failed' });
-        } else {
-          deleteKeys.push(item.key);
-          state.pendingKeys.delete(item.indicator_kode);
-          state.failedKeys.delete(item.indicator_kode);
-        }
-        updateSyncDot(item.indicator_kode);
-      });
-      await outboxDelete(deleteKeys);
-    } catch (error) {
-      failedTotal += group.length;
-      group.forEach((item) => {
-        state.failedKeys.add(item.indicator_kode);
-        updateSyncDot(item.indicator_kode);
-      });
-      if (manual) toast(error.message, 'error');
+          updateSyncDot(item.indicator_kode);
+        });
+        if (manual) toast(error.message, 'error');
+      }
     }
+  } finally {
+    state.flushing = false;
   }
-  state.flushing = false;
   await refreshOutboxCount();
   updateSyncPill();
   if (manual) {

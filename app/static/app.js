@@ -1438,8 +1438,21 @@ function openEnrollmentModal(exam) {
     body: `
       <form id="enrollment-form">
         <div class="field"><label for="enrollment-school">Sekolah</label><select id="enrollment-school">${choices.map((school) => `<option value="${school.id}">${esc(school.nama)} (${esc(school.scheme_kode)})</option>`).join('')}</select></div>
-        <div class="field"><label for="enrollment-participant">Peserta dari daftar induk</label><select id="enrollment-participant"></select></div>
-        <div class="field"><label for="enrollment-group">Kelompok ujian</label><input id="enrollment-group" placeholder="Contoh: XII TKJ 1"></div>
+        <div class="field"><label for="enrollment-mode">Metode tambah</label><select id="enrollment-mode"><option value="batch">Batch per Kelas</option><option value="single">Satu per Satu</option></select></div>
+        <div id="enrollment-batch-fields">
+          <div class="field"><label for="enrollment-class">Kelas</label><select id="enrollment-class"></select></div>
+          <div class="field">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <label style="margin:0">Daftar peserta (<span id="enrollment-batch-count">0</span> dipilih)</label>
+              <button type="button" class="btn ghost" id="enrollment-toggle-all" style="padding:4px 10px;font-size:12px">Batal pilih</button>
+            </div>
+            <div id="enrollment-batch-list" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:6px"></div>
+          </div>
+        </div>
+        <div id="enrollment-single-fields" class="hidden">
+          <div class="field"><label for="enrollment-participant">Peserta dari daftar induk</label><select id="enrollment-participant"></select></div>
+        </div>
+        <div class="field"><label for="enrollment-group">Kelompok ujian</label><input id="enrollment-group" placeholder="Kosongkan untuk pakai nama kelas peserta"></div>
         <p id="enrollment-error" class="error-text" role="alert"></p>
       </form>`,
     actions: [
@@ -1449,10 +1462,46 @@ function openEnrollmentModal(exam) {
         className: 'primary',
         onClick: async ({ close, button }) => {
           const school = choices.find((item) => String(item.id) === document.querySelector('#enrollment-school').value);
-          const participantId = Number(document.querySelector('#enrollment-participant').value);
+          const mode = document.querySelector('#enrollment-mode').value;
+          const groupLabel = document.querySelector('#enrollment-group').value.trim();
           const error = document.querySelector('#enrollment-error');
-          if (!school || !participantId) {
-            error.textContent = 'Pilih sekolah dan peserta terlebih dahulu.';
+          error.textContent = '';
+          if (!school) {
+            error.textContent = 'Pilih sekolah terlebih dahulu.';
+            return;
+          }
+          if (mode === 'batch') {
+            const participantIds = [...document.querySelectorAll('#enrollment-batch-list input[name="batch_participant"]:checked')]
+              .map((input) => Number(input.value))
+              .filter(Boolean);
+            if (!participantIds.length) {
+              error.textContent = 'Pilih minimal satu peserta pada kelas tersebut.';
+              return;
+            }
+            button.disabled = true;
+            try {
+              const res = await api(`/exams/${exam.id}/enrollments/batch`, {
+                method: 'POST',
+                body: {
+                  school_id: school.id,
+                  scheme_kode: school.scheme_kode,
+                  participant_ids: participantIds,
+                  group_label: groupLabel,
+                },
+              });
+              close();
+              const info = res.skipped ? ` (${res.skipped} sudah terdaftar)` : '';
+              toast(`${res.added} asesi ditambahkan ke roster${info}.`, 'success');
+              await renderExamDetail(exam.id);
+            } catch (requestError) {
+              error.textContent = requestError.message;
+              button.disabled = false;
+            }
+            return;
+          }
+          const participantId = Number(document.querySelector('#enrollment-participant').value);
+          if (!participantId) {
+            error.textContent = 'Pilih peserta terlebih dahulu.';
             return;
           }
           button.disabled = true;
@@ -1462,7 +1511,7 @@ function openEnrollmentModal(exam) {
               body: {
                 participant_id: participantId,
                 scheme_kode: school.scheme_kode,
-                group_label: document.querySelector('#enrollment-group').value.trim(),
+                group_label: groupLabel,
               },
             });
             close();
@@ -1477,19 +1526,88 @@ function openEnrollmentModal(exam) {
     ],
     onMount: (root) => {
       const select = root.querySelector('#enrollment-school');
+      const modeSelect = root.querySelector('#enrollment-mode');
+      const batchFields = root.querySelector('#enrollment-batch-fields');
+      const singleFields = root.querySelector('#enrollment-single-fields');
+      const classSelect = root.querySelector('#enrollment-class');
+      const batchList = root.querySelector('#enrollment-batch-list');
+      const batchCount = root.querySelector('#enrollment-batch-count');
+      const toggleAllBtn = root.querySelector('#enrollment-toggle-all');
       const participantSelect = root.querySelector('#enrollment-participant');
+      let allParticipants = [];
+
+      const updateBatchCount = () => {
+        const checkboxes = [...batchList.querySelectorAll('input[name="batch_participant"]')];
+        const checked = checkboxes.filter((cb) => cb.checked).length;
+        batchCount.textContent = String(checked);
+        toggleAllBtn.textContent = checkboxes.length && checked === checkboxes.length ? 'Batal pilih' : 'Pilih semua';
+      };
+
+      const renderBatchList = () => {
+        const selectedClass = classSelect.value;
+        const filtered = selectedClass === '__ALL__'
+          ? allParticipants
+          : allParticipants.filter((p) => (p.kelas || '').trim() === selectedClass);
+        batchList.innerHTML = filtered.length
+          ? filtered.map((participant) => `
+              <label class="checkbox-row" style="margin:0">
+                <input type="checkbox" name="batch_participant" value="${participant.id}" checked>
+                <span><strong>${esc(participant.nomor)}</strong> — ${esc(participant.nama)} <span class="muted">(${esc(participant.kelas || 'Tanpa kelas')})</span></span>
+              </label>`).join('')
+          : '<div class="muted" style="padding:6px">Belum ada peserta pada kelas ini.</div>';
+        batchList.querySelectorAll('input[name="batch_participant"]').forEach((cb) => {
+          cb.addEventListener('change', updateBatchCount);
+        });
+        updateBatchCount();
+      };
+
+      const syncMode = () => {
+        const isBatch = modeSelect.value === 'batch';
+        batchFields.classList.toggle('hidden', !isBatch);
+        singleFields.classList.toggle('hidden', isBatch);
+      };
+
       const loadParticipants = async () => {
         if (!select.value) {
+          allParticipants = [];
           participantSelect.innerHTML = '';
+          classSelect.innerHTML = '';
+          renderBatchList();
           return;
         }
         const participants = await api(`/schools/${select.value}/participants`);
-        const rows = participants.data || [];
-        participantSelect.innerHTML = rows.length
-          ? rows.map((participant) => `<option value="${participant.id}">${esc(participant.nomor)} — ${esc(participant.nama)} (${esc(participant.kelas || '—')})</option>`).join('')
+        allParticipants = participants.data || [];
+        participantSelect.innerHTML = allParticipants.length
+          ? allParticipants.map((participant) => `<option value="${participant.id}">${esc(participant.nomor)} — ${esc(participant.nama)} (${esc(participant.kelas || '—')})</option>`).join('')
           : '<option value="">Belum ada peserta pada sekolah ini</option>';
+
+        const classes = [...new Set(allParticipants.map((p) => (p.kelas || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+        const hasBlankClass = allParticipants.some((p) => !(p.kelas || '').trim());
+        const classOptions = ['<option value="__ALL__">Semua kelas (' + allParticipants.length + ')</option>'];
+        classes.forEach((cls) => {
+          const count = allParticipants.filter((p) => (p.kelas || '').trim() === cls).length;
+          classOptions.push(`<option value="${esc(cls)}">${esc(cls)} (${count})</option>`);
+        });
+        if (hasBlankClass) {
+          const count = allParticipants.filter((p) => !(p.kelas || '').trim()).length;
+          classOptions.push(`<option value="">Tanpa kelas (${count})</option>`);
+        }
+        classSelect.innerHTML = classOptions.join('');
+        renderBatchList();
       };
+
+      modeSelect.addEventListener('change', syncMode);
+      classSelect.addEventListener('change', renderBatchList);
+      toggleAllBtn.addEventListener('click', () => {
+        const checkboxes = [...batchList.querySelectorAll('input[name="batch_participant"]')];
+        const allChecked = checkboxes.length && checkboxes.every((cb) => cb.checked);
+        checkboxes.forEach((cb) => {
+          cb.checked = !allChecked;
+        });
+        updateBatchCount();
+      });
       select.addEventListener('change', () => loadParticipants().catch((error) => toast(error.message, 'error')));
+      syncMode();
       loadParticipants().catch((error) => toast(error.message, 'error'));
     },
   });

@@ -76,6 +76,14 @@ class EnrollmentCreate(BaseModel):
     group_label: str = ""
 
 
+class EnrollmentBatchCreate(BaseModel):
+    school_id: int
+    scheme_kode: str
+    participant_ids: list[int] | None = None
+    kelas: str | None = None
+    group_label: str = ""
+
+
 class EnrollmentPatch(BaseModel):
     group_label: str
 
@@ -998,6 +1006,99 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         )
         conn.commit()
         return _enrollment_payload(_enrollment_row(conn, enrollment_id))
+
+    @app.post("/api/exams/{exam_id}/enrollments/batch", status_code=201)
+    def create_enrollment_batch(exam_id: int, body: EnrollmentBatchCreate, ctx: tuple = Depends(auth_ctx)):
+        conn, user = ctx
+        exam = _resolve_exam(conn, exam_id)
+        if exam["status"] not in {"draft", "active"}:
+            fail(409, "exam_roster_closed")
+        school = conn.execute("SELECT * FROM school WHERE id=?", (body.school_id,)).fetchone()
+        if school is None:
+            fail(404, "school_not_found")
+        if conn.execute(
+            "SELECT 1 FROM exam_school WHERE exam_id=? AND school_id=?",
+            (exam_id, body.school_id),
+        ).fetchone() is None:
+            fail(400, "school_not_associated")
+        if conn.execute(
+            "SELECT 1 FROM exam_scheme WHERE exam_id=? AND scheme_kode=?",
+            (exam_id, body.scheme_kode),
+        ).fetchone() is None:
+            fail(400, "scheme_not_associated")
+        if body.scheme_kode != school["scheme_kode"]:
+            fail(400, "school_scheme_mismatch", scheme_kode=school["scheme_kode"])
+
+        if body.participant_ids is not None:
+            ids = [int(pid) for pid in body.participant_ids if pid]
+            if not ids:
+                return {"added": 0, "skipped": 0, "total": 0}
+            placeholders = ",".join("?" for _ in ids)
+            participants = conn.execute(
+                f"SELECT * FROM participant WHERE school_id=? AND id IN ({placeholders}) ORDER BY nomor",
+                [body.school_id, *ids],
+            ).fetchall()
+        elif body.kelas is not None:
+            participants = conn.execute(
+                "SELECT * FROM participant WHERE school_id=? AND lower(trim(coalesce(kelas,''))) = lower(trim(?)) ORDER BY nomor",
+                (body.school_id, body.kelas),
+            ).fetchall()
+        else:
+            participants = conn.execute(
+                "SELECT * FROM participant WHERE school_id=? ORDER BY nomor",
+                (body.school_id,),
+            ).fetchall()
+
+        now = db.utcnow()
+        custom_group = _clean(body.group_label)
+        added = 0
+        skipped = 0
+        for participant in participants:
+            exists = conn.execute(
+                "SELECT 1 FROM exam_enrollment WHERE exam_id=? AND participant_id=? AND scheme_kode=?",
+                (exam_id, participant["id"], body.scheme_kode),
+            ).fetchone()
+            if exists:
+                skipped += 1
+                continue
+            conn.execute(
+                """INSERT INTO exam_enrollment
+                   (exam_id, participant_id, school_id, scheme_kode, group_label,
+                    snapshot_number, snapshot_name, snapshot_class, snapshot_school_name,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    exam_id,
+                    participant["id"],
+                    body.school_id,
+                    body.scheme_kode,
+                    custom_group or (participant["kelas"] or ""),
+                    participant["nomor"],
+                    participant["nama"],
+                    participant["kelas"] or "",
+                    school["nama"],
+                    now,
+                    now,
+                ),
+            )
+            added += 1
+
+        db.audit(
+            conn,
+            user["id"],
+            "enrollment_batch_create",
+            "exam",
+            exam_id,
+            new_value={
+                "school_id": body.school_id,
+                "scheme_kode": body.scheme_kode,
+                "kelas": body.kelas,
+                "added": added,
+                "skipped": skipped,
+            },
+        )
+        conn.commit()
+        return {"added": added, "skipped": skipped, "total": len(participants)}
 
     @app.patch("/api/exams/{exam_id}/enrollments/{enrollment_id}")
     def patch_enrollment(

@@ -3490,6 +3490,145 @@ async function openSubModal(sub = null) {
 /* ------------------------------------------------------------------ */
 /* Sync & backup                                                      */
 /* ------------------------------------------------------------------ */
+function openSheetsConfigModal(sheetsInfo) {
+  let uploadedJsonText = '';
+  let previewEmail = sheetsInfo.service_account_email || '';
+
+  openModal({
+    title: 'Koneksi Google Sheets',
+    body: `
+      <form id="sheets-config-form">
+        <div class="field">
+          <label for="sheets-url-input">1. Tempel Link atau ID Google Spreadsheet</label>
+          <input id="sheets-url-input" value="${esc(sheetsInfo.spreadsheet_id || '')}" placeholder="https://docs.google.com/spreadsheets/d/.../edit">
+          <p class="hint" style="margin-top:4px">Anda bisa menempelkan URL lengkap dari browser atau hanya ID Spreadsheet-nya.</p>
+        </div>
+        <div class="field">
+          <label for="sheets-json-file">2. Upload File JSON Service Account</label>
+          <input id="sheets-json-file" type="file" accept=".json,application/json">
+          <p class="hint" style="margin-top:4px">${sheetsInfo.has_credentials ? 'Kredensial JSON sudah tersimpan di server. Upload ulang hanya jika ingin mengganti.' : 'Ambil file JSON dari Google Cloud Console &rarr; IAM &amp; Admin &rarr; Service Accounts &rarr; Keys.'}</p>
+        </div>
+        <div class="field">
+          <label for="sheets-json-text">Atau tempel isi JSON secara manual (opsional)</label>
+          <textarea id="sheets-json-text" rows="3" placeholder="${sheetsInfo.has_credentials ? 'Kosongkan untuk tetap memakai kredensial yang sudah tersimpan' : '{\n  &quot;type&quot;: &quot;service_account&quot;,\n  ...\n}'}"></textarea>
+        </div>
+        <div id="sheets-email-preview" class="warning-box ${previewEmail ? '' : 'hidden'}" style="margin-top:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+            <div style="min-width:0">
+              <strong>3. Bagikan (Share) Spreadsheet ke email ini sebagai Editor:</strong>
+              <div class="mono" id="sheets-email-value" style="margin-top:4px;word-break:break-all;font-size:0.82rem">${esc(previewEmail)}</div>
+            </div>
+            <button type="button" class="btn small" id="copy-sa-email">Salin Email</button>
+          </div>
+        </div>
+        <p id="sheets-config-error" class="error-text" role="alert"></p>
+      </form>`,
+    actions: [
+      ...(sheetsInfo.source === 'ui'
+        ? [
+            {
+              label: 'Putuskan',
+              className: 'danger',
+              onClick: async ({ close, button }) => {
+                button.disabled = true;
+                try {
+                  await api('/sync/sheets/config', { method: 'DELETE' });
+                  close();
+                  toast('Koneksi Google Sheets dihapus.', 'success');
+                  await renderSync();
+                } catch (err) {
+                  document.querySelector('#sheets-config-error').textContent = err.message;
+                  button.disabled = false;
+                }
+              },
+            },
+          ]
+        : []),
+      { label: 'Batal', className: 'ghost' },
+      {
+        label: 'Simpan Koneksi',
+        className: 'primary',
+        onClick: async ({ close, button }) => {
+          const urlOrId = document.querySelector('#sheets-url-input').value.trim();
+          const manualJson = document.querySelector('#sheets-json-text').value.trim();
+          const finalJson = manualJson || uploadedJsonText;
+          const errorEl = document.querySelector('#sheets-config-error');
+          errorEl.textContent = '';
+          if (!urlOrId) {
+            errorEl.textContent = 'Link atau ID Google Spreadsheet wajib diisi.';
+            return;
+          }
+          if (!sheetsInfo.has_credentials && !finalJson) {
+            errorEl.textContent = 'Upload atau tempel JSON Service Account terlebih dahulu.';
+            return;
+          }
+          button.disabled = true;
+          try {
+            await api('/sync/sheets/config', {
+              method: 'POST',
+              body: {
+                spreadsheet_url_or_id: urlOrId,
+                service_account_json: finalJson || null,
+              },
+            });
+            close();
+            toast('Pengaturan Google Sheets disimpan. Klik Tes Koneksi untuk memastikan akses.', 'success');
+            await renderSync();
+          } catch (err) {
+            errorEl.textContent = err.message;
+            button.disabled = false;
+          }
+        },
+      },
+    ],
+    onMount: (root) => {
+      const fileInput = root.querySelector('#sheets-json-file');
+      const textInput = root.querySelector('#sheets-json-text');
+      const emailBox = root.querySelector('#sheets-email-preview');
+      const emailValue = root.querySelector('#sheets-email-value');
+      const copyBtn = root.querySelector('#copy-sa-email');
+      const errorEl = root.querySelector('#sheets-config-error');
+
+      const updatePreviewFromJson = (raw) => {
+        if (!raw) return;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.client_email) {
+            previewEmail = parsed.client_email;
+            emailValue.textContent = previewEmail;
+            emailBox.classList.remove('hidden');
+            errorEl.textContent = '';
+          }
+        } catch {
+          // Biarkan validasi final berjalan saat simpan
+        }
+      };
+
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        uploadedJsonText = await file.text();
+        textInput.value = '';
+        updatePreviewFromJson(uploadedJsonText);
+      });
+
+      textInput.addEventListener('input', () => {
+        updatePreviewFromJson(textInput.value.trim());
+      });
+
+      copyBtn.addEventListener('click', async () => {
+        if (!previewEmail) return;
+        try {
+          await navigator.clipboard.writeText(previewEmail);
+          toast('Email Service Account disalin.', 'success');
+        } catch {
+          toast('Gagal menyalin otomatis, silakan salin manual.', 'error');
+        }
+      });
+    },
+  });
+}
+
 async function renderSync() {
   setPage('Sinkron & Backup', 'Operasional');
   const [status, backups] = await Promise.all([
@@ -3513,16 +3652,22 @@ async function renderSync() {
         <div class="card-head"><div><div class="card-title">Google Sheets</div><div class="card-sub">Satu arah, tab per sekolah.</div></div><span class="badge ${sheetsInfo.status === 'enabled' ? 'success' : 'warning'}">${esc(sheetsInfo.status || 'disabled')}</span></div>
         <div class="card-body">
           ${sheetsInfo.enabled
-            ? '<p class="hint">Kredensial terdeteksi. Sinkron manual akan menulis hasil per sekolah ke tab masing-masing.</p>'
-            : `<div class="warning-box"><strong>Sheets nonaktif.</strong><p style="margin-top:4px">${esc(sheetsInfo.reason || 'Set GOOGLE_SERVICE_ACCOUNT_JSON dan GOOGLE_SHEETS_ID untuk mengaktifkan.')}</p></div>`}
+            ? `<p class="hint">Kredensial aktif (${sheetsInfo.source === 'env' ? 'via .env' : 'via Pengaturan UI'}). Sinkron akan menulis hasil per sekolah ke tab masing-masing.</p>`
+            : `<div class="warning-box"><strong>Sheets belum terhubung.</strong><p style="margin-top:4px">${esc(sheetsInfo.reason || 'Klik Atur Koneksi untuk menghubungkan ke Google Spreadsheet.')}</p></div>`}
           <div class="detail-list" style="margin-top:14px">
+            <dt>Spreadsheet</dt>
+            <dd>${sheetsInfo.spreadsheet_id ? `<a href="https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetsInfo.spreadsheet_id)}/edit" target="_blank" rel="noopener noreferrer" class="mono">${esc(sheetsInfo.spreadsheet_id)} &nearr;</a>` : '<span class="muted">Belum diatur</span>'}</dd>
+            <dt>Service Account</dt>
+            <dd>${sheetsInfo.service_account_email ? `<span class="mono" style="word-break:break-all">${esc(sheetsInfo.service_account_email)}</span>` : '<span class="muted">Belum diunggah</span>'}</dd>
             <dt>Terakhir sync skor</dt><dd>${fmtDateTime(status.last_scores_sync)}</dd>
             <dt>Terakhir sync Sheets</dt><dd>${fmtDateTime(status.last_sheets_sync)}</dd>
             <dt>Skor pending</dt><dd>${fmtNumber(status.pending_scores)}</dd>
             <dt>Outbox Sheets</dt><dd>${fmtNumber(status.pending_sheets)}</dd>
           </div>
-          <div class="copy-row">
-            <button class="btn ${sheetsInfo.enabled ? 'primary' : ''}" id="sync-sheets" type="button" ${sheetsInfo.enabled ? '' : 'disabled'}>Sinkron sekarang</button>
+          <div class="copy-row" style="flex-wrap:wrap;gap:8px">
+            <button class="btn primary" id="config-sheets" type="button">${sheetsInfo.enabled ? 'Ubah Koneksi' : 'Atur Koneksi Sheets'}</button>
+            <button class="btn" id="test-sheets" type="button" ${sheetsInfo.enabled ? '' : 'disabled'}>Tes Koneksi</button>
+            <button class="btn ${sheetsInfo.enabled ? 'success' : ''}" id="sync-sheets" type="button" ${sheetsInfo.enabled ? '' : 'disabled'}>Sinkron sekarang</button>
           </div>
         </div>
       </div>
@@ -3548,6 +3693,15 @@ async function renderSync() {
     </div>`;
   document.querySelector('#flush-now').addEventListener('click', () => flushOutbox(true));
   document.querySelector('#refresh-sync').addEventListener('click', () => renderSync());
+  document.querySelector('#config-sheets').addEventListener('click', () => openSheetsConfigModal(sheetsInfo));
+  document.querySelector('#test-sheets').addEventListener('click', async () => {
+    try {
+      const result = await api('/sync/sheets/test', { method: 'POST', body: {} });
+      toast(`Terhubung ke "${result.title}" (${(result.tabs || []).length} tab).`, 'success');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  });
   document.querySelector('#sync-sheets').addEventListener('click', async () => {
     try {
       const result = await api('/sync/sheets', { method: 'POST', body: {} });

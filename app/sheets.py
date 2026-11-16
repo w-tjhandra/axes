@@ -17,26 +17,108 @@ except ImportError:  # pragma: no cover
 INVALID_TAB_CHARS = re.compile(r"[\[\]:*?/\\]")
 SYSTEM_TAB_NAMES = {"", "history", "ringkasan", "config", "sheet1"}
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SPREADSHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
 
-def status() -> dict[str, Any]:
-    path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    sheet_id = os.environ.get("GOOGLE_SHEETS_ID", "").strip()
-    if not path or not sheet_id:
+def extract_spreadsheet_id(raw: str | None) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    match = SPREADSHEET_URL_RE.search(text)
+    if match:
+        return match.group(1)
+    return text
+
+
+def _load_service_account_info(raw_json: str, env_path: str) -> tuple[dict[str, Any] | None, str | None]:
+    if raw_json:
+        try:
+            info = json.loads(raw_json)
+            if isinstance(info, dict) and info.get("client_email") and info.get("private_key"):
+                return info, None
+            return None, "Format JSON service account tidak valid (client_email / private_key kosong)"
+        except Exception:
+            return None, "JSON service account tidak dapat dibaca"
+    if env_path:
+        path = Path(env_path).expanduser()
+        if not path.exists():
+            return None, "File service account tidak ditemukan"
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(info, dict) and info.get("client_email") and info.get("private_key"):
+                return info, None
+            return None, "Format file JSON service account tidak valid"
+        except Exception:
+            return None, "File JSON service account tidak dapat dibaca"
+    return None, None
+
+
+def resolve_settings(
+    db_path: str | os.PathLike[str] | None = None,
+    conn=None,
+) -> dict[str, Any]:
+    own_conn = conn is None
+    if own_conn:
+        conn = db.connect(db_path)
+    try:
+        config = db.all_config(conn)
+    finally:
+        if own_conn:
+            conn.close()
+
+    ui_sheet_id = extract_spreadsheet_id(config.get("google_sheets_id"))
+    ui_json = (config.get("google_service_account_json") or "").strip()
+    env_sheet_id = extract_spreadsheet_id(os.environ.get("GOOGLE_SHEETS_ID", ""))
+    env_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+
+    sheet_id = ui_sheet_id or env_sheet_id
+    source = "ui" if (ui_sheet_id or ui_json) else ("env" if (env_sheet_id or env_path) else "none")
+    info, err = _load_service_account_info(ui_json, env_path if not ui_json else "")
+    return {
+        "spreadsheet_id": sheet_id,
+        "service_account_info": info,
+        "service_account_email": info.get("client_email") if info else None,
+        "has_credentials": info is not None,
+        "credentials_error": err,
+        "source": source,
+    }
+
+
+def status(db_path: str | os.PathLike[str] | None = None, conn=None) -> dict[str, Any]:
+    cfg = resolve_settings(db_path=db_path, conn=conn)
+    sheet_id = cfg["spreadsheet_id"]
+    if cfg["credentials_error"]:
         return {
             "status": "disabled",
             "enabled": False,
-            "reason": "GOOGLE_SERVICE_ACCOUNT_JSON atau GOOGLE_SHEETS_ID belum diset",
+            "reason": cfg["credentials_error"],
             "spreadsheet_configured": bool(sheet_id),
+            "spreadsheet_id": sheet_id,
+            "service_account_email": cfg["service_account_email"],
+            "has_credentials": False,
+            "source": cfg["source"],
         }
-    if not Path(path).expanduser().exists():
+    if not cfg["has_credentials"] or not sheet_id:
         return {
             "status": "disabled",
             "enabled": False,
-            "reason": "File service account tidak ditemukan",
-            "spreadsheet_configured": True,
+            "reason": "Spreadsheet ID atau JSON Service Account belum diatur",
+            "spreadsheet_configured": bool(sheet_id),
+            "spreadsheet_id": sheet_id,
+            "service_account_email": cfg["service_account_email"],
+            "has_credentials": cfg["has_credentials"],
+            "source": cfg["source"],
         }
-    return {"status": "enabled", "enabled": True, "reason": None, "spreadsheet_configured": True}
+    return {
+        "status": "enabled",
+        "enabled": True,
+        "reason": None,
+        "spreadsheet_configured": True,
+        "spreadsheet_id": sheet_id,
+        "service_account_email": cfg["service_account_email"],
+        "has_credentials": True,
+        "source": cfg["source"],
+    }
 
 
 def sanitize_tab_name(name: str, fallback: str = "Sekolah") -> str:
@@ -228,14 +310,48 @@ def _rows_for_exam_school(
     return headers, rows
 
 
-def _build_service():
+def _build_service(service_account_info: dict[str, Any]):
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
 
-    credentials = Credentials.from_service_account_file(
-        os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"], scopes=SCOPES
-    )
+    credentials = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+
+
+def test_connection(db_path: str | os.PathLike[str] | None = None, conn=None) -> dict[str, Any]:
+    cfg = resolve_settings(db_path=db_path, conn=conn)
+    if cfg["credentials_error"]:
+        return {"ok": False, "message": cfg["credentials_error"]}
+    if not cfg["has_credentials"] or not cfg["spreadsheet_id"]:
+        return {"ok": False, "message": "Spreadsheet ID atau JSON Service Account belum lengkap."}
+    try:
+        service = _build_service(cfg["service_account_info"])
+        meta = (
+            service.spreadsheets()
+            .get(
+                spreadsheetId=cfg["spreadsheet_id"],
+                fields="properties.title,sheets.properties.title",
+            )
+            .execute()
+        )
+        tabs = [item["properties"]["title"] for item in meta.get("sheets", [])]
+        return {
+            "ok": True,
+            "title": meta.get("properties", {}).get("title", "Spreadsheet"),
+            "tabs": tabs,
+            "spreadsheet_id": cfg["spreadsheet_id"],
+        }
+    except Exception as exc:
+        msg = str(exc)
+        if "403" in msg or "permission" in msg.lower():
+            email = cfg["service_account_email"] or "service account"
+            return {
+                "ok": False,
+                "message": f"Akses ditolak (403). Pastikan Spreadsheet sudah di-Share ke {email} sebagai Editor.",
+            }
+        if "404" in msg or "not found" in msg.lower():
+            return {"ok": False, "message": "Spreadsheet tidak ditemukan (404). Periksa kembali URL atau ID Spreadsheet."}
+        return {"ok": False, "message": f"Gagal terhubung ke Google Sheets: {msg}"}
 
 
 def _ensure_tab(service, spreadsheet_id: str, tab: str, known_tabs: dict[str, int]) -> None:
@@ -254,17 +370,18 @@ def sync_schools(
     db_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Push hasil sekolah ke Sheets. Tidak pernah melempar error ke caller."""
-    state = status()
-    if not state["enabled"]:
-        return {
-            "status": "disabled",
-            "synced_schools": 0,
-            "rows_upserted": 0,
-            "message": state["reason"],
-        }
-
     conn = db.connect(db_path)
     try:
+        cfg = resolve_settings(conn=conn)
+        state = status(conn=conn)
+        if not state["enabled"]:
+            return {
+                "status": "disabled",
+                "synced_schools": 0,
+                "rows_upserted": 0,
+                "message": state["reason"],
+            }
+
         config = db.all_config(conn)
         if exam_id is not None:
             exam = conn.execute("SELECT * FROM exam WHERE id=?", (exam_id,)).fetchone()
@@ -291,8 +408,8 @@ def sync_schools(
         if not schools:
             return {"status": "ok", "synced_schools": 0, "rows_upserted": 0, "message": "Tidak ada sekolah"}
 
-        service = _build_service()
-        spreadsheet_id = os.environ["GOOGLE_SHEETS_ID"]
+        service = _build_service(cfg["service_account_info"])
+        spreadsheet_id = cfg["spreadsheet_id"]
         meta = (
             service.spreadsheets()
             .get(spreadsheetId=spreadsheet_id, fields="sheets.properties")

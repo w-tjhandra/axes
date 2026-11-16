@@ -187,6 +187,11 @@ class SheetsBody(BaseModel):
     exam_id: int | None = None
 
 
+class SheetsConfigBody(BaseModel):
+    spreadsheet_url_or_id: str
+    service_account_json: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Fungsi Helper Domain
 # ---------------------------------------------------------------------------
@@ -1902,9 +1907,62 @@ def _register_sync_and_admin_routes(app: FastAPI, active_db_path: Path, db_dep: 
             "last_scores_sync": config.get("last_scores_sync"),
             "last_sheets_sync": config.get("last_sheets_sync"),
             "failed_items": [dict(row) for row in failed],
-            "sheets": sheets.status(),
+            "sheets": sheets.status(conn=conn),
             "backup_dir_configured": bool(os.environ.get("BACKUP_DIR")),
         }
+
+    @app.post("/api/sync/sheets/config")
+    def save_sheets_config(body: SheetsConfigBody, ctx: tuple = Depends(auth_ctx)):
+        conn, user = ctx
+        sheet_id = sheets.extract_spreadsheet_id(body.spreadsheet_url_or_id)
+        if not sheet_id:
+            fail(400, "invalid_spreadsheet_id", message="URL atau ID Google Spreadsheet tidak valid.")
+        raw_json = (body.service_account_json or "").strip()
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+            except Exception:
+                fail(400, "invalid_service_account_json", message="File atau teks JSON Service Account tidak valid.")
+            if (
+                not isinstance(parsed, dict)
+                or parsed.get("type") != "service_account"
+                or not parsed.get("client_email")
+                or not parsed.get("private_key")
+            ):
+                fail(
+                    400,
+                    "invalid_service_account_json",
+                    message="JSON harus berupa kunci Service Account Google (memiliki client_email dan private_key).",
+                )
+            db.set_config(conn, "google_service_account_json", json.dumps(parsed))
+        db.set_config(conn, "google_sheets_id", sheet_id)
+        db.audit(
+            conn,
+            user["id"],
+            "sheets_config_update",
+            "config",
+            "google_sheets",
+            new_value={"spreadsheet_id": sheet_id, "updated_credentials": bool(raw_json)},
+        )
+        conn.commit()
+        return sheets.status(conn=conn)
+
+    @app.delete("/api/sync/sheets/config")
+    def clear_sheets_config(ctx: tuple = Depends(auth_ctx)):
+        conn, user = ctx
+        db.set_config(conn, "google_sheets_id", "")
+        db.set_config(conn, "google_service_account_json", "")
+        db.audit(conn, user["id"], "sheets_config_clear", "config", "google_sheets")
+        conn.commit()
+        return sheets.status(conn=conn)
+
+    @app.post("/api/sync/sheets/test")
+    def test_sheets_connection(ctx: tuple = Depends(auth_ctx)):
+        conn, _ = ctx
+        result = sheets.test_connection(conn=conn)
+        if not result.get("ok"):
+            fail(400, "sheets_test_failed", message=result.get("message"))
+        return result
 
     @app.post("/api/sync/sheets")
     def sync_sheets(body: SheetsBody, ctx: tuple = Depends(auth_ctx)):

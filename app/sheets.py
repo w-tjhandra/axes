@@ -437,10 +437,11 @@ def sync_schools(
                 headers, rows = _rows_for_exam_school(conn, exam_id, school["id"], config)
             else:
                 headers, rows = _rows_for_school(conn, school["id"], config)
+            escaped_tab = tab.replace("'", "''")
             existing_values = (
                 service.spreadsheets()
                 .values()
-                .get(spreadsheetId=spreadsheet_id, range=f"'{tab}'!A2:A")
+                .get(spreadsheetId=spreadsheet_id, range=f"'{escaped_tab}'!A2:A")
                 .execute()
                 .get("values", [])
             )
@@ -451,7 +452,7 @@ def sync_schools(
             }
 
             data: list[dict[str, Any]] = [
-                {"range": f"'{tab}'!A1", "values": [headers]},
+                {"range": f"'{escaped_tab}'!A1", "values": [headers]},
             ]
             last_col = _column_letter(len(headers))
             next_row = max(existing_rows.values(), default=1) + 1
@@ -459,9 +460,9 @@ def sync_schools(
                 nomor = str(row[0]).strip()
                 row_index = existing_rows.get(nomor)
                 if row_index:
-                    data.append({"range": f"'{tab}'!A{row_index}:{last_col}{row_index}", "values": [row]})
+                    data.append({"range": f"'{escaped_tab}'!A{row_index}:{last_col}{row_index}", "values": [row]})
                 else:
-                    data.append({"range": f"'{tab}'!A{next_row}:{last_col}{next_row}", "values": [row]})
+                    data.append({"range": f"'{escaped_tab}'!A{next_row}:{last_col}{next_row}", "values": [row]})
                     existing_rows[nomor] = next_row
                     next_row += 1
                 rows_upserted += 1
@@ -478,11 +479,19 @@ def sync_schools(
             "message": None,
         }
     except Exception as exc:  # jangan crash: kembalikan status error yang aman
+        msg = str(exc)
+        if "403" in msg or "permission" in msg.lower():
+            email = cfg.get("service_account_email") or "service account"
+            friendly = f"Akses ditolak (403). Pastikan Spreadsheet sudah di-Share ke {email} sebagai Editor dan Google Sheets API aktif."
+        elif "404" in msg or "not found" in msg.lower():
+            friendly = "Spreadsheet tidak ditemukan (404). Periksa kembali URL atau ID Spreadsheet."
+        else:
+            friendly = f"Sinkron Sheets gagal ({type(exc).__name__}): {msg[:220]}"
         return {
             "status": "error",
             "synced_schools": 0,
             "rows_upserted": 0,
-            "message": f"Sinkron Sheets gagal: {type(exc).__name__}",
+            "message": friendly,
         }
     finally:
         conn.close()

@@ -1085,8 +1085,18 @@ async function openExamModal(exam = null) {
           <div class="field"><label for="exam-year-input">Tahun</label><input id="exam-year-input" name="year" type="number" min="2000" max="2200" required value="${exam?.year || new Date().getFullYear()}"></div>
           <div class="field"><label for="exam-starts">Tanggal mulai</label><input id="exam-starts" name="starts_on" type="date" value="${esc(exam?.starts_on || '')}"></div>
           <div class="field"><label for="exam-ends">Tanggal selesai</label><input id="exam-ends" name="ends_on" type="date" value="${esc(exam?.ends_on || '')}"></div>
-          <div class="field full"><label for="exam-schools">Sekolah (Ctrl/Cmd untuk memilih beberapa)</label><select id="exam-schools" multiple size="4">${schools.map((school) => `<option value="${school.id}" ${selectedSchools.has(school.id) ? 'selected' : ''}>${esc(school.nama)} · ${esc(school.scheme_kode)}</option>`).join('')}</select></div>
-          <div class="field full"><label for="exam-schemes">Skema tersedia</label><select id="exam-schemes" multiple size="4">${schemes.map((scheme) => `<option value="${esc(scheme.kode)}" ${selectedSchemes.has(scheme.kode) || (!exam && state.activeScheme === scheme.kode) ? 'selected' : ''}>${esc(scheme.kode)} — ${esc(scheme.nama)}</option>`).join('')}</select></div>
+          <div class="field full">
+            <label>Sekolah peserta ujian</label>
+            <div class="card" style="padding:8px;max-height:150px;overflow:auto">
+              ${schools.length ? schools.map((school) => `<label class="checkbox-row" style="border:0;background:transparent;padding:6px 8px"><input type="checkbox" name="exam_school" value="${school.id}" ${selectedSchools.has(school.id) || (!exam && schools.length === 1) ? 'checked' : ''}><span>${esc(school.nama)} <span class="muted">· ${esc(school.scheme_kode)}</span></span></label>`).join('') : '<div class="hint" style="padding:6px 8px">Belum ada sekolah terdaftar. Tambahkan di menu Sekolah / TUK terlebih dahulu.</div>'}
+            </div>
+          </div>
+          <div class="field full">
+            <label>Skema tersedia</label>
+            <div class="card" style="padding:8px;max-height:150px;overflow:auto">
+              ${schemes.map((scheme) => `<label class="checkbox-row" style="border:0;background:transparent;padding:6px 8px"><input type="checkbox" name="exam_scheme" value="${esc(scheme.kode)}" ${selectedSchemes.has(scheme.kode) || (!exam && state.activeScheme === scheme.kode) ? 'checked' : ''}><span><span class="mono">${esc(scheme.kode)}</span> — ${esc(scheme.nama)}</span></label>`).join('')}
+            </div>
+          </div>
           <div class="field full"><label for="exam-notes">Catatan</label><textarea id="exam-notes" name="notes" rows="3">${esc(exam?.notes || '')}</textarea></div>
         </div>
         <p id="exam-form-error" class="error-text" role="alert"></p>
@@ -1105,8 +1115,8 @@ async function openExamModal(exam = null) {
             starts_on: form.starts_on.value || null,
             ends_on: form.ends_on.value || null,
             notes: form.notes.value.trim(),
-            school_ids: [...form.querySelector('#exam-schools').selectedOptions].map((option) => Number(option.value)),
-            scheme_kodes: [...form.querySelector('#exam-schemes').selectedOptions].map((option) => option.value),
+            school_ids: [...form.querySelectorAll('input[name="exam_school"]:checked')].map((item) => Number(item.value)),
+            scheme_kodes: [...form.querySelectorAll('input[name="exam_scheme"]:checked')].map((item) => item.value),
           };
           button.disabled = true;
           error.textContent = '';
@@ -1402,11 +1412,32 @@ function openEnrollmentModal(exam) {
   const choices = exam.schools.filter((school) =>
     exam.schemes.some((scheme) => scheme.kode === school.scheme_kode)
   );
+  if (!choices.length) {
+    const reason = !exam.schools.length
+      ? 'Ujian ini belum memiliki sekolah yang dipilih.'
+      : 'Sekolah pada ujian ini belum memiliki skema yang cocok dengan skema ujian.';
+    openModal({
+      title: 'Tambah asesi ke roster',
+      body: `<div class="warning-box"><strong>${esc(reason)}</strong><p style="margin-top:6px">Pilih sekolah dan skema pada pengaturan ujian terlebih dahulu sebelum menambahkan asesi.</p></div>`,
+      actions: [
+        { label: 'Tutup', className: 'ghost' },
+        {
+          label: 'Pilih sekolah di ujian',
+          className: 'primary',
+          onClick: ({ close }) => {
+            close();
+            openExamModal(exam);
+          },
+        },
+      ],
+    });
+    return;
+  }
   openModal({
     title: 'Tambah asesi ke roster',
     body: `
       <form id="enrollment-form">
-        <div class="field"><label for="enrollment-school">Sekolah</label><select id="enrollment-school">${choices.map((school) => `<option value="${school.id}">${esc(school.nama)}</option>`).join('')}</select></div>
+        <div class="field"><label for="enrollment-school">Sekolah</label><select id="enrollment-school">${choices.map((school) => `<option value="${school.id}">${esc(school.nama)} (${esc(school.scheme_kode)})</option>`).join('')}</select></div>
         <div class="field"><label for="enrollment-participant">Peserta dari daftar induk</label><select id="enrollment-participant"></select></div>
         <div class="field"><label for="enrollment-group">Kelompok ujian</label><input id="enrollment-group" placeholder="Contoh: XII TKJ 1"></div>
         <p id="enrollment-error" class="error-text" role="alert"></p>
@@ -1417,9 +1448,13 @@ function openEnrollmentModal(exam) {
         label: 'Tambahkan',
         className: 'primary',
         onClick: async ({ close, button }) => {
-          const school = exam.schools.find((item) => String(item.id) === document.querySelector('#enrollment-school').value);
+          const school = choices.find((item) => String(item.id) === document.querySelector('#enrollment-school').value);
           const participantId = Number(document.querySelector('#enrollment-participant').value);
           const error = document.querySelector('#enrollment-error');
+          if (!school || !participantId) {
+            error.textContent = 'Pilih sekolah dan peserta terlebih dahulu.';
+            return;
+          }
           button.disabled = true;
           try {
             await api(`/exams/${exam.id}/enrollments`, {
@@ -1444,8 +1479,15 @@ function openEnrollmentModal(exam) {
       const select = root.querySelector('#enrollment-school');
       const participantSelect = root.querySelector('#enrollment-participant');
       const loadParticipants = async () => {
+        if (!select.value) {
+          participantSelect.innerHTML = '';
+          return;
+        }
         const participants = await api(`/schools/${select.value}/participants`);
-        participantSelect.innerHTML = participants.data.map((participant) => `<option value="${participant.id}">${esc(participant.nomor)} — ${esc(participant.nama)} (${esc(participant.kelas || '—')})</option>`).join('');
+        const rows = participants.data || [];
+        participantSelect.innerHTML = rows.length
+          ? rows.map((participant) => `<option value="${participant.id}">${esc(participant.nomor)} — ${esc(participant.nama)} (${esc(participant.kelas || '—')})</option>`).join('')
+          : '<option value="">Belum ada peserta pada sekolah ini</option>';
       };
       select.addEventListener('change', () => loadParticipants().catch((error) => toast(error.message, 'error')));
       loadParticipants().catch((error) => toast(error.message, 'error'));
@@ -1454,11 +1496,32 @@ function openEnrollmentModal(exam) {
 }
 
 function openRosterImportModal(exam, file) {
+  const choices = exam.schools.filter((school) =>
+    exam.schemes.some((scheme) => scheme.kode === school.scheme_kode)
+  );
+  if (!choices.length) {
+    openModal({
+      title: 'Impor roster CSV',
+      body: `<div class="warning-box"><strong>Belum ada sekolah yang sesuai pada ujian ini.</strong><p style="margin-top:6px">Pilih sekolah dan skema pada pengaturan ujian terlebih dahulu.</p></div>`,
+      actions: [
+        { label: 'Tutup', className: 'ghost' },
+        {
+          label: 'Pilih sekolah di ujian',
+          className: 'primary',
+          onClick: ({ close }) => {
+            close();
+            openExamModal(exam);
+          },
+        },
+      ],
+    });
+    return;
+  }
   openModal({
     title: 'Impor roster CSV',
     body: `
       <form id="roster-import-form">
-        <div class="field"><label for="import-school">Sekolah</label><select id="import-school">${exam.schools.map((school) => `<option value="${school.id}">${esc(school.nama)}</option>`).join('')}</select></div>
+        <div class="field"><label for="import-school">Sekolah</label><select id="import-school">${choices.map((school) => `<option value="${school.id}">${esc(school.nama)} (${esc(school.scheme_kode)})</option>`).join('')}</select></div>
         <div class="field"><label for="import-group">Kelompok default (opsional)</label><input id="import-group" placeholder="Bisa ditimpa kolom kelompok"></div>
         <p class="hint">Kolom wajib: nomor, nama. Opsional: kelas, kelompok. Peserta baru dibuat pada daftar induk; nomor yang sama dengan nama berbeda dilaporkan, tidak menimpa data.</p>
         <p id="roster-import-error" class="error-text" role="alert"></p>

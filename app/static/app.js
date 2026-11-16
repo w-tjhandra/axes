@@ -2560,6 +2560,8 @@ function indicatorHtml(indicator, locked) {
 
 function bindAssessmentEvents() {
   const view = document.querySelector('#view');
+  if (view.dataset.assessmentBound === '1') return;
+  view.dataset.assessmentBound = '1';
   view.addEventListener('click', async (event) => {
     const scoreButton = event.target.closest('[data-score]');
     if (scoreButton && !scoreButton.disabled) {
@@ -3747,7 +3749,7 @@ async function init() {
   });
   setInterval(() => {
     if (navigator.onLine) flushOutbox();
-  }, 15000);
+  }, 10000);
   try {
     await bootAuth();
     await refreshOutboxCount();

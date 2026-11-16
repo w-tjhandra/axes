@@ -7,12 +7,14 @@ kode mudah dibaca, diuji, dan mendukung banyak skema asesmen secara simultan.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 import os
 import secrets
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterator
@@ -1348,6 +1350,8 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
             status = apply_score_item(conn, assessment, item, user["id"], body.client_ts)
             result_counts[status if status in result_counts else "failed"] += 1
         db.set_config(conn, "last_scores_sync", db.utcnow())
+        if result_counts["synced"] > 0:
+            db.set_config(conn, "sheets_dirty", "1")
         conn.commit()
         result = compute_assessment_result(conn, assessment)
         return {
@@ -1395,6 +1399,7 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
             assessment_id,
             new_value={"status": "locked", "confirm_empty": body.confirm_empty, "empty_count": len(empty)},
         )
+        db.set_config(conn, "sheets_dirty", "1")
         conn.commit()
         return {"status": "locked", "locked_at": now, "result": result}
 
@@ -1884,6 +1889,8 @@ def _register_sync_and_admin_routes(app: FastAPI, active_db_path: Path, db_dep: 
                     {"assessment_id": item.assessment_id, "indicator_kode": item.indicator_kode, "error": status}
                 )
         db.set_config(conn, "last_scores_sync", db.utcnow())
+        if synced > 0:
+            db.set_config(conn, "sheets_dirty", "1")
         conn.commit()
         return {"synced": synced, "skipped": skipped, "failed": failed}
 
@@ -1936,6 +1943,7 @@ def _register_sync_and_admin_routes(app: FastAPI, active_db_path: Path, db_dep: 
                 )
             db.set_config(conn, "google_service_account_json", json.dumps(parsed))
         db.set_config(conn, "google_sheets_id", sheet_id)
+        db.set_config(conn, "sheets_dirty", "1")
         db.audit(
             conn,
             user["id"],
@@ -2077,14 +2085,67 @@ def _register_sync_and_admin_routes(app: FastAPI, active_db_path: Path, db_dep: 
 # ---------------------------------------------------------------------------
 # App Factory
 # ---------------------------------------------------------------------------
+def _run_periodic_sheets_sync(db_path: Path) -> None:
+    conn = db.connect(db_path)
+    try:
+        config = db.all_config(conn)
+        if config.get("sheets_dirty") != "1":
+            return
+        if not sheets.status(conn=conn).get("enabled"):
+            return
+    finally:
+        conn.close()
+
+    info = sheets.sync_schools(db_path=db_path)
+    if info.get("status") == "ok":
+        conn = db.connect(db_path)
+        try:
+            db.set_config(conn, "last_sheets_sync", db.utcnow())
+            db.set_config(conn, "sheets_dirty", "0")
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def create_app(db_path: str | os.PathLike[str] | None = None) -> FastAPI:
     active_db_path = db.init_db(db_path)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        stop_event = asyncio.Event()
+        task = None
+        if not os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("UKK_DISABLE_BG_SYNC") != "1":
+            async def _sync_loop():
+                while not stop_event.is_set():
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+                        break
+                    except TimeoutError:
+                        pass
+                    try:
+                        await asyncio.to_thread(_run_periodic_sheets_sync, active_db_path)
+                    except Exception:
+                        pass
+
+            task = asyncio.create_task(_sync_loop())
+        try:
+            yield
+        finally:
+            stop_event.set()
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
     app = FastAPI(
         title="AeroAssess — Multi-Scheme Assessor & Competency Portal",
         version="2.0.0",
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         redoc_url=None,
+        lifespan=lifespan,
     )
     app.state.db_path = active_db_path
     app.state.rate_limiter = auth.LoginRateLimiter()

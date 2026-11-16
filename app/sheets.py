@@ -426,7 +426,7 @@ def sync_schools(
             for item in meta.get("sheets", [])
         }
 
-        used_tabs: set[str] = set(known_tabs)
+        used_tabs: set[str] = set()
         synced_schools = 0
         rows_upserted = 0
         for school in schools:

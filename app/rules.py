@@ -12,6 +12,10 @@ from typing import Any, Iterable, Mapping
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "pass_threshold": 70,
+    "technical_weight": 60,
+    "knowledge_weight": 40,
+    "final_pass_threshold": 65,
+    "min_sub_passed": 1,
     "predicate_sangat_mahir": 90,
     "predicate_mahir": 80,
     "predicate_cakap": 70,
@@ -190,20 +194,22 @@ def compute_result(
     all_passed = bool(unit_results) and all(u["passed"] for u in unit_results)
     sub_ranked = _rank_sub_competencies(sub_competencies, by_code)
     fulfilled_subs = [s for s in sub_ranked if s["fulfilled"]]
+    min_sub_passed = max(1, int(cfg.get("min_sub_passed", 1)))
 
     selected_sub: dict[str, Any] | None = None
     if all_passed:
         outcome = "kompeten_penuh"
-    elif fulfilled_subs:
+    elif len(fulfilled_subs) >= min_sub_passed:
         selected_sub = fulfilled_subs[0]
         outcome = "kompeten_sub"
-    elif passed:
-        outcome = "kompeten_unit"
     else:
         outcome = "belum_kompeten"
 
+    total_score = sum(u["total_score"] for u in unit_results)
+    max_score = sum(u["max_score"] for u in unit_results)
+    technical_percent = round((total_score / max_score) * 100, 2) if max_score > 0 else 0.0
     average_passed = round(mean([u["percent"] for u in passed]), 2) if passed else None
-    predicate = predicate_for(average_passed, cfg)
+    predicate = predicate_for(average_passed, cfg) if outcome != "belum_kompeten" else None
     statement = _build_statement(cfg, outcome, participant, predicate, selected_sub, passed_codes)
 
     return {
@@ -211,6 +217,7 @@ def compute_result(
         "outcome_label": OUTCOME_LABELS[outcome],
         "predicate": predicate,
         "average_percent": average_passed,
+        "technical_percent": technical_percent,
         "unit_passed": passed_codes,
         "unit_failed": failed_codes,
         "unit_results": unit_results,
@@ -220,8 +227,8 @@ def compute_result(
         "statement": statement,
         "empty_count": len(empty_indicators),
         "empty_indicators": empty_indicators,
-        "total_score": sum(u["total_score"] for u in unit_results),
-        "max_score": sum(u["max_score"] for u in unit_results),
+        "total_score": total_score,
+        "max_score": max_score,
     }
 
 

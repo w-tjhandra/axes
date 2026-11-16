@@ -1291,7 +1291,7 @@ async function renderExamDetail(examId, archiveRoute = false) {
     item.exam_id === examId || (!item.exam_id && exam.schemes.some((scheme) => scheme.kode === item.scheme_kode))
   );
   const totalPages = Math.max(1, Math.ceil(roster.meta.total / 50));
-  const passing = new Set(['kompeten_penuh', 'kompeten_sub', 'kompeten_unit']);
+  const passing = new Set(['kompeten_penuh', 'kompeten_sub']);
   setPage(exam.title, readOnly ? 'Arsip Ujian' : `Tahun ${exam.year}`);
   document.querySelector('#view').innerHTML = `
     <div class="page-head">
@@ -1877,7 +1877,9 @@ async function renderSchemes() {
               <span class="chip">${fmtNumber(scheme.units_count)} Unit</span>
               <span class="chip">${fmtNumber(scheme.indicators_count)} Indikator</span>
               <span class="chip">${fmtNumber(scheme.sub_competencies_count)} Sub Kompetensi</span>
-              <span class="chip">Ambang ${fmtNumber(scheme.pass_threshold)}%</span>
+              <span class="chip">Ambang Unit ${fmtNumber(scheme.pass_threshold)}%</span>
+              <span class="chip">Teknis ${fmtNumber(scheme.technical_weight ?? 60)}% · Knowledge ${fmtNumber(scheme.knowledge_weight ?? 40)}%</span>
+              <span class="chip">Final &gt; ${fmtNumber(scheme.final_pass_threshold ?? 65)}%</span>
               <span class="chip">${fmtNumber(scheme.schools_count)} Sekolah</span>
               <span class="chip">${fmtNumber(scheme.participants_count)} Peserta</span>
             </div>
@@ -1968,6 +1970,22 @@ function openSchemeModal(scheme = null) {
             <label for="scheme-threshold">Ambang Lulus Unit (%)</label>
             <input id="scheme-threshold" name="pass_threshold" type="number" min="1" max="100" value="${esc(scheme?.pass_threshold ?? 70)}">
           </div>
+          <div class="field">
+            <label for="scheme-tech-weight">Bobot Teknis (%)</label>
+            <input id="scheme-tech-weight" name="technical_weight" type="number" min="0" max="100" value="${esc(scheme?.technical_weight ?? 60)}">
+          </div>
+          <div class="field">
+            <label for="scheme-know-weight">Bobot Knowledge (%)</label>
+            <input id="scheme-know-weight" name="knowledge_weight" type="number" min="0" max="100" value="${esc(scheme?.knowledge_weight ?? 40)}">
+          </div>
+          <div class="field">
+            <label for="scheme-final-threshold">Ambang Nilai Akhir (%)</label>
+            <input id="scheme-final-threshold" name="final_pass_threshold" type="number" min="1" max="100" value="${esc(scheme?.final_pass_threshold ?? 65)}">
+          </div>
+          <div class="field">
+            <label for="scheme-min-sub">Min. Sub-Kompetensi Lulus</label>
+            <input id="scheme-min-sub" name="min_sub_passed" type="number" min="1" max="20" value="${esc(scheme?.min_sub_passed ?? 1)}">
+          </div>
           <div class="field full">
             <label for="scheme-deskripsi">Deskripsi Skema</label>
             <textarea id="scheme-deskripsi" name="deskripsi" placeholder="Ringkasan ruang lingkup uji kompetensi...">${esc(scheme?.deskripsi || '')}</textarea>
@@ -1990,6 +2008,10 @@ function openSchemeModal(scheme = null) {
             kategori: form.kategori.value.trim(),
             jenjang: form.jenjang.value.trim(),
             pass_threshold: Number(form.pass_threshold.value || 70),
+            technical_weight: Number(form.technical_weight.value ?? 60),
+            knowledge_weight: Number(form.knowledge_weight.value ?? 40),
+            final_pass_threshold: Number(form.final_pass_threshold.value || 65),
+            min_sub_passed: Number(form.min_sub_passed.value || 1),
             deskripsi: form.deskripsi.value.trim(),
           };
           try {
@@ -2675,17 +2697,17 @@ function computePreview() {
   subs.sort((a, b) => (b.average_percent - a.average_percent) || ((a.urutan || 0) - (b.urutan || 0)));
   const fulfilledSubs = subs.filter((sub) => sub.fulfilled);
   const allPassed = units.length > 0 && units.every((unit) => unit.passed);
+  const minSubPassed = Math.max(1, Number(state.assessment?.thresholds?.min_sub_passed ?? 1));
   let outcome;
   let selectedSub = null;
   if (allPassed) outcome = 'kompeten_penuh';
-  else if (fulfilledSubs.length) { outcome = 'kompeten_sub'; selectedSub = fulfilledSubs[0]; }
-  else if (passed.length) outcome = 'kompeten_unit';
+  else if (fulfilledSubs.length >= minSubPassed) { outcome = 'kompeten_sub'; selectedSub = fulfilledSubs[0]; }
   else outcome = 'belum_kompeten';
 
   const average = passed.length
     ? Math.round((passed.reduce((sum, unit) => sum + unit.percent, 0) / passed.length) * 100) / 100
     : null;
-  const predicate = predicateFor(average);
+  const predicate = outcome !== 'belum_kompeten' ? predicateFor(average) : null;
   const labels = {
     kompeten_penuh: 'Kompeten Penuh',
     kompeten_sub: 'Kompeten pada Sub Kompetensi',

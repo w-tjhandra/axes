@@ -173,28 +173,44 @@ def _headers(snapshot: dict[str, Any]) -> list[str]:
         "Nomor",
         "Nama",
         "Kelas",
-        "Status",
+        "Status Asesmen",
         *unit_codes,
         "Unit Lulus",
         "Unit Tidak Lulus",
         "Sub Kompetensi",
-        "Predikat",
-        "Pernyataan",
+        "Nilai Teknis (Avg)",
+        "Nilai Knowledge",
+        "Nilai Total",
+        "Status",
+        "Kompetensi Didapat",
         "Locked At",
     ]
 
 
-def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list[str], list[list[Any]]]:
+def _technical_avg(result: dict[str, Any] | None) -> float | str:
+    if not result:
+        return ""
+    if "technical_percent" in result:
+        return result["technical_percent"]
+    max_s = result.get("max_score") or 0
+    if max_s > 0:
+        return round(((result.get("total_score") or 0) / max_s) * 100, 2)
+    return ""
+
+
+def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
+    school = conn.execute("SELECT * FROM school WHERE id = ?", (school_id,)).fetchone()
+    scheme_kode = school["scheme_kode"] if school else db.DEFAULT_SCHEME_KODE
     participants = conn.execute(
         "SELECT * FROM participant WHERE school_id = ? ORDER BY nomor", (school_id,)
     ).fetchall()
-    snapshot = db.get_snapshot(conn)
+    snapshot = db.get_snapshot(conn, scheme_kode)
     headers = _headers(snapshot)
     rows: list[list[Any]] = []
     for participant in participants:
         assessment = _latest_assessment(conn, participant["id"])
         result = _result_for(conn, assessment, config)
-        unit_values: list[Any] = []
+        unit_values: list[Any] = [""] * len(snapshot.get("units", []))
         if result:
             percent_by_code = {u["kode"]: u["percent"] for u in result.get("unit_results", [])}
             unit_values = [
@@ -215,17 +231,20 @@ def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list
                 ", ".join(result.get("unit_passed", [])) if result else "",
                 ", ".join(result.get("unit_failed", [])) if result else "",
                 sub_text,
-                (result or {}).get("predicate") or "",
-                (result or {}).get("statement") or "",
+                _technical_avg(result),
+                "",
+                "",
+                "",
+                "",
                 (assessment["locked_at"] if assessment else "") or "",
             ]
         )
-    return headers, rows
+    return headers, rows, snapshot
 
 
 def _rows_for_exam_school(
     conn, exam_id: int, school_id: int, config: dict[str, Any]
-) -> tuple[list[str], list[list[Any]]]:
+) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
     exam = conn.execute("SELECT * FROM exam WHERE id=?", (exam_id,)).fetchone()
     school = conn.execute("SELECT * FROM school WHERE id=?", (school_id,)).fetchone()
     if exam is None or school is None:
@@ -250,8 +269,11 @@ def _rows_for_exam_school(
         "Unit Lulus",
         "Unit Tidak Lulus",
         "Sub Kompetensi",
-        "Predikat",
-        "Outcome",
+        "Nilai Teknis (Avg)",
+        "Nilai Knowledge",
+        "Nilai Total",
+        "Status",
+        "Kompetensi Didapat",
         "Locked At",
     ]
     enrollments = conn.execute(
@@ -304,12 +326,15 @@ def _rows_for_exam_school(
                 ", ".join((result or {}).get("unit_passed", [])),
                 ", ".join((result or {}).get("unit_failed", [])),
                 sub_text,
-                (result or {}).get("predicate") or "",
-                (result or {}).get("outcome") or "",
+                _technical_avg(result),
+                "",
+                "",
+                "",
+                "",
                 enrollment["locked_at"] or "",
             ]
         )
-    return headers, rows
+    return headers, rows, snapshot
 
 
 def _build_service(service_account_info: dict[str, Any]):
@@ -452,9 +477,9 @@ def sync_schools(
             _ensure_tab(service, spreadsheet_id, tab, known_tabs)
 
             if exam_id is not None:
-                headers, rows = _rows_for_exam_school(conn, exam_id, school["id"], config)
+                headers, rows, snapshot = _rows_for_exam_school(conn, exam_id, school["id"], config)
             else:
-                headers, rows = _rows_for_school(conn, school["id"], config)
+                headers, rows, snapshot = _rows_for_school(conn, school["id"], config)
             escaped_tab = tab.replace("'", "''")
             existing_values = (
                 service.spreadsheets()
@@ -469,6 +494,19 @@ def sync_schools(
                 if row and str(row[0]).strip()
             }
 
+            know_idx = headers.index("Nilai Knowledge") + 1
+            col_failed = _column_letter(know_idx - 3)
+            col_sub = _column_letter(know_idx - 2)
+            col_tech = _column_letter(know_idx - 1)
+            col_know = _column_letter(know_idx)
+            col_total = _column_letter(know_idx + 1)
+            col_status = _column_letter(know_idx + 2)
+            thresholds = snapshot.get("thresholds") or {}
+            tech_w = round(float(thresholds.get("technical_weight", 60)) / 100.0, 4)
+            know_w = round(float(thresholds.get("knowledge_weight", 40)) / 100.0, 4)
+            final_thresh = float(thresholds.get("final_pass_threshold", 65))
+            scheme_name = str(snapshot.get("scheme_nama") or "Junior Network Technician").replace('"', '""')
+
             data: list[dict[str, Any]] = [
                 {"range": f"'{escaped_tab}'!A1", "values": [headers]},
             ]
@@ -477,16 +515,26 @@ def sync_schools(
             for row in rows:
                 nomor = str(row[0]).strip()
                 row_index = existing_rows.get(nomor)
+                target_r = row_index if row_index else next_row
+                formula_total = f'=IF({col_tech}{target_r}="","",({col_tech}{target_r}*{tech_w})+(N({col_know}{target_r})*{know_w}))'
+                formula_status = f'=IF({col_total}{target_r}="","",IF(AND({col_total}{target_r}>{final_thresh},{col_sub}{target_r}<>""),"Kompeten","Tidak Kompeten"))'
+                formula_comp = f'=IF({col_status}{target_r}="Kompeten",IF({col_failed}{target_r}="","{scheme_name}",{col_sub}{target_r}),IF({col_status}{target_r}="Tidak Kompeten","Belum Kompeten",""))'
+                row_with_formulas = list(row)
+                row_with_formulas[know_idx] = formula_total
+                row_with_formulas[know_idx + 1] = formula_status
+                row_with_formulas[know_idx + 2] = formula_comp
+
                 if row_index:
-                    data.append({"range": f"'{escaped_tab}'!A{row_index}:{last_col}{row_index}", "values": [row]})
+                    data.append({"range": f"'{escaped_tab}'!A{target_r}:{col_tech}{target_r}", "values": [row_with_formulas[: know_idx - 1]]})
+                    data.append({"range": f"'{escaped_tab}'!{col_total}{target_r}:{last_col}{target_r}", "values": [row_with_formulas[know_idx:]]})
                 else:
-                    data.append({"range": f"'{escaped_tab}'!A{next_row}:{last_col}{next_row}", "values": [row]})
-                    existing_rows[nomor] = next_row
+                    data.append({"range": f"'{escaped_tab}'!A{target_r}:{last_col}{target_r}", "values": [row_with_formulas]})
+                    existing_rows[nomor] = target_r
                     next_row += 1
                 rows_upserted += 1
             service.spreadsheets().values().batchUpdate(
                 spreadsheetId=spreadsheet_id,
-                body={"valueInputOption": "RAW", "data": data},
+                body={"valueInputOption": "USER_ENTERED", "data": data},
             ).execute()
             synced_schools += 1
         return {

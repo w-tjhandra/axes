@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS scheme (
   kategori TEXT NOT NULL DEFAULT 'Sertifikasi & Vokasi',
   deskripsi TEXT,
   pass_threshold INTEGER NOT NULL DEFAULT 70,
+  technical_weight INTEGER NOT NULL DEFAULT 60,
+  knowledge_weight INTEGER NOT NULL DEFAULT 40,
+  final_pass_threshold INTEGER NOT NULL DEFAULT 65,
+  min_sub_passed INTEGER NOT NULL DEFAULT 1,
   predicate_sangat_mahir INTEGER NOT NULL DEFAULT 90,
   predicate_mahir INTEGER NOT NULL DEFAULT 80,
   predicate_cakap INTEGER NOT NULL DEFAULT 70,
@@ -437,6 +441,20 @@ def _migrate_annual_exams(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_scheme_weights(conn: sqlite3.Connection) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(scheme)").fetchall()}
+    migrations = [
+        ("technical_weight", "INTEGER NOT NULL DEFAULT 60"),
+        ("knowledge_weight", "INTEGER NOT NULL DEFAULT 40"),
+        ("final_pass_threshold", "INTEGER NOT NULL DEFAULT 65"),
+        ("min_sub_passed", "INTEGER NOT NULL DEFAULT 1"),
+    ]
+    for col_name, col_def in migrations:
+        if col_name not in cols:
+            conn.execute(f"ALTER TABLE scheme ADD COLUMN {col_name} {col_def}")
+    conn.commit()
+
+
 def init_db(path: str | os.PathLike[str] | None = None) -> Path:
     try:
         from .seed_data import seed
@@ -448,6 +466,7 @@ def init_db(path: str | os.PathLike[str] | None = None) -> Path:
         conn.executescript(SCHEMA)
         _migrate_multi_scheme(conn)
         _migrate_annual_exams(conn)
+        _migrate_scheme_weights(conn)
         seed(conn)
     return db_path
 
@@ -644,6 +663,10 @@ def get_snapshot(conn: sqlite3.Connection, scheme_kode: str = DEFAULT_SCHEME_KOD
         "sub_competencies": subs,
         "thresholds": {
             "pass_threshold": scheme_row["pass_threshold"] if scheme_row else 70,
+            "technical_weight": scheme_row["technical_weight"] if scheme_row and "technical_weight" in scheme_row.keys() else 60,
+            "knowledge_weight": scheme_row["knowledge_weight"] if scheme_row and "knowledge_weight" in scheme_row.keys() else 40,
+            "final_pass_threshold": scheme_row["final_pass_threshold"] if scheme_row and "final_pass_threshold" in scheme_row.keys() else 65,
+            "min_sub_passed": scheme_row["min_sub_passed"] if scheme_row and "min_sub_passed" in scheme_row.keys() else 1,
             "predicate_sangat_mahir": scheme_row["predicate_sangat_mahir"] if scheme_row else 90,
             "predicate_mahir": scheme_row["predicate_mahir"] if scheme_row else 80,
             "predicate_cakap": scheme_row["predicate_cakap"] if scheme_row else 70,

@@ -62,6 +62,10 @@ class SchemeBody(BaseModel):
     kategori: str = "Sertifikasi & Vokasi"
     deskripsi: str | None = None
     pass_threshold: int = 70
+    technical_weight: int = 60
+    knowledge_weight: int = 40
+    final_pass_threshold: int = 65
+    min_sub_passed: int = 1
     predicate_sangat_mahir: int = 90
     predicate_mahir: int = 80
     predicate_cakap: int = 70
@@ -73,6 +77,10 @@ class SchemePatch(BaseModel):
     kategori: str | None = None
     deskripsi: str | None = None
     pass_threshold: int | None = None
+    technical_weight: int | None = None
+    knowledge_weight: int | None = None
+    final_pass_threshold: int | None = None
+    min_sub_passed: int | None = None
     predicate_sangat_mahir: int | None = None
     predicate_mahir: int | None = None
     predicate_cakap: int | None = None
@@ -239,6 +247,10 @@ def config_for_rules(conn: sqlite3.Connection, snapshot: dict[str, Any] | None =
     scheme_nama = (snapshot or {}).get("scheme_nama") or "Junior Network Technician"
     return {
         "pass_threshold": snap_thresh.get("pass_threshold", config.get("pass_threshold", 70)),
+        "technical_weight": snap_thresh.get("technical_weight", config.get("technical_weight", 60)),
+        "knowledge_weight": snap_thresh.get("knowledge_weight", config.get("knowledge_weight", 40)),
+        "final_pass_threshold": snap_thresh.get("final_pass_threshold", config.get("final_pass_threshold", 65)),
+        "min_sub_passed": snap_thresh.get("min_sub_passed", config.get("min_sub_passed", 1)),
         "predicate_sangat_mahir": snap_thresh.get(
             "predicate_sangat_mahir", config.get("predicate_sangat_mahir", 90)
         ),
@@ -710,14 +722,17 @@ def _register_scheme_and_recap_routes(app: FastAPI, auth_ctx: Any) -> None:
             "unit": "Peserta {peserta} dinyatakan kompeten pada unit {unit} dengan predikat {predikat}.",
             "belum": "Peserta {peserta} dinyatakan belum kompeten.",
         }
+        if body.technical_weight + body.knowledge_weight != 100:
+            fail(400, "invalid_weight", message="Bobot Teknis + Knowledge harus berjumlah 100%.")
         now = db.utcnow()
         conn.execute(
             """
             INSERT INTO scheme
                 (kode, nama, kategori, deskripsi, pass_threshold,
+                 technical_weight, knowledge_weight, final_pass_threshold, min_sub_passed,
                  predicate_sangat_mahir, predicate_mahir, predicate_cakap,
                  templates_json, aktif, version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
             """,
             (
                 kode,
@@ -725,6 +740,10 @@ def _register_scheme_and_recap_routes(app: FastAPI, auth_ctx: Any) -> None:
                 normalize_space(body.kategori) or "Sertifikasi & Vokasi",
                 normalize_space(body.deskripsi),
                 body.pass_threshold,
+                body.technical_weight,
+                body.knowledge_weight,
+                body.final_pass_threshold,
+                max(1, body.min_sub_passed),
                 body.predicate_sangat_mahir,
                 body.predicate_mahir,
                 body.predicate_cakap,
@@ -761,6 +780,13 @@ def _register_scheme_and_recap_routes(app: FastAPI, auth_ctx: Any) -> None:
             changes["deskripsi"] = normalize_space(changes["deskripsi"])
         if "aktif" in changes:
             changes["aktif"] = 1 if changes["aktif"] else 0
+        if "technical_weight" in changes or "knowledge_weight" in changes:
+            tw = changes.get("technical_weight", row["technical_weight"] if "technical_weight" in row.keys() else 60)
+            kw = changes.get("knowledge_weight", row["knowledge_weight"] if "knowledge_weight" in row.keys() else 40)
+            if tw + kw != 100:
+                fail(400, "invalid_weight", message="Bobot Teknis + Knowledge harus berjumlah 100%.")
+        if "min_sub_passed" in changes:
+            changes["min_sub_passed"] = max(1, int(changes["min_sub_passed"]))
         if changes:
             fields = ", ".join(f"{k} = ?" for k in changes)
             conn.execute(
@@ -1571,6 +1597,13 @@ def _register_config_routes(app: FastAPI, auth_ctx: Any) -> None:
                 fail(409, "urutan_exists")
         if "aktif" in changes:
             changes["aktif"] = 1 if changes["aktif"] else 0
+        if "technical_weight" in changes or "knowledge_weight" in changes:
+            tw = changes.get("technical_weight", row["technical_weight"] if "technical_weight" in row.keys() else 60)
+            kw = changes.get("knowledge_weight", row["knowledge_weight"] if "knowledge_weight" in row.keys() else 40)
+            if tw + kw != 100:
+                fail(400, "invalid_weight", message="Bobot Teknis + Knowledge harus berjumlah 100%.")
+        if "min_sub_passed" in changes:
+            changes["min_sub_passed"] = max(1, int(changes["min_sub_passed"]))
         if not changes:
             return dict(row)
         bump = any(key in changes for key in ("urutan", "aktif"))
@@ -1676,6 +1709,13 @@ def _register_indicator_and_sub_routes(app: FastAPI, auth_ctx: Any) -> None:
                 fail(409, "urutan_exists")
         if "aktif" in changes:
             changes["aktif"] = 1 if changes["aktif"] else 0
+        if "technical_weight" in changes or "knowledge_weight" in changes:
+            tw = changes.get("technical_weight", row["technical_weight"] if "technical_weight" in row.keys() else 60)
+            kw = changes.get("knowledge_weight", row["knowledge_weight"] if "knowledge_weight" in row.keys() else 40)
+            if tw + kw != 100:
+                fail(400, "invalid_weight", message="Bobot Teknis + Knowledge harus berjumlah 100%.")
+        if "min_sub_passed" in changes:
+            changes["min_sub_passed"] = max(1, int(changes["min_sub_passed"]))
         if not changes:
             return dict(row)
         bump = any(key in changes for key in ("urutan", "aktif"))

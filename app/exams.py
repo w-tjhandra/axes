@@ -1476,7 +1476,7 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         if enrollment["assessment_id"] is None or enrollment["assessment_status"] != "locked":
             fail(409, "assessment_not_final")
         result = json.loads(enrollment["result_json"]) if enrollment["result_json"] else {}
-        if result.get("outcome") not in {"kompeten_penuh", "kompeten_sub", "kompeten_unit"}:
+        if result.get("outcome") not in {"kompeten_penuh", "kompeten_sub"}:
             fail(409, "certificate_requires_passing_result")
         template = _pick_template(conn, enrollment, body.template_id)
         conn.execute("BEGIN IMMEDIATE")

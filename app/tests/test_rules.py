@@ -150,18 +150,27 @@ def test_sub_dipilih_rata_rata_tertinggi():
     assert sk03["average_percent"] < 100.0
 
 
-def test_unit_lulus_tanpa_sub_jadi_kompeten_unit():
+def test_unit_lulus_tanpa_sub_jadi_belum_kompeten():
     units = build_units()
     scores = zero_scores(units)
     fill_unit(scores, units, "J.611000.008.02")
     result = rules.compute_result(units, build_subs(), scores, "Ahmad (03)")
-    assert result["outcome"] == "kompeten_unit"
+    assert result["outcome"] == "belum_kompeten"
     assert result["unit_passed"] == ["J.611000.008.02"]
-    assert result["predicate"] == "Sangat Mahir"
-    assert result["statement"] == (
-        "Peserta Ahmad (03) dinyatakan kompeten pada unit J.611000.008.02 "
-        "dengan predikat Sangat Mahir."
-    )
+    assert result["predicate"] is None
+    assert result["technical_percent"] > 0
+    assert result["statement"] == "Peserta Ahmad (03) dinyatakan belum kompeten."
+
+
+def test_min_sub_passed_mewajibkan_jumlah_sub_kompetensi():
+    units = build_units()
+    scores = zero_scores(units)
+    for kode in ["J.611000.003.02", "J.611000.004.01"]:
+        fill_unit(scores, units, kode)
+    res_one = rules.compute_result(units, build_subs(), scores, "Ahmad (03)", {"min_sub_passed": 1})
+    assert res_one["outcome"] == "kompeten_sub"
+    res_two = rules.compute_result(units, build_subs(), scores, "Ahmad (03)", {"min_sub_passed": 2})
+    assert res_two["outcome"] == "belum_kompeten"
 
 
 def test_tidak_ada_unit_lulus_belum_kompeten():
@@ -231,7 +240,7 @@ def test_label_peserta_dan_semua_format_pernyataan():
     scores = zero_scores(units)
     fill_unit(scores, units, "J.611000.008.02")
     unit_only = rules.compute_result(units, subs, scores, "Ahmad (03)")
-    assert unit_only["statement"].startswith("Peserta Ahmad (03) dinyatakan kompeten pada unit")
+    assert unit_only["statement"] == "Peserta Ahmad (03) dinyatakan belum kompeten."
 
     belum = rules.compute_result(units, subs, zero_scores(units), "Ahmad (03)")
     assert belum["statement"] == "Peserta Ahmad (03) dinyatakan belum kompeten."

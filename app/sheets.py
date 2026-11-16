@@ -318,6 +318,21 @@ def _build_service(service_account_info: dict[str, Any]):
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
+def _friendly_google_error(exc: Exception, email: str | None) -> str:
+    msg = str(exc)
+    lower = msg.lower()
+    if "has not been used in project" in lower or "accessnotconfigured" in lower or "api has not been used" in lower or "is disabled" in lower:
+        url_match = re.search(r"https://console\.[^\s\"'>]+", msg)
+        link_note = f" Buka: {url_match.group(0)}" if url_match else ""
+        return f"Google Sheets API belum diaktifkan di Google Cloud Project Anda.{link_note} Setelah diaktifkan, tunggu 1-2 menit lalu coba lagi."
+    if "403" in msg or "permission" in lower:
+        sa_email = email or "service account"
+        return f"Akses ditolak (403). Pastikan Google Sheets API aktif dan Spreadsheet sudah di-Share ke {sa_email} sebagai Editor."
+    if "404" in msg or "not found" in lower:
+        return "Spreadsheet tidak ditemukan (404). Periksa kembali URL atau ID Spreadsheet."
+    return f"Gagal terhubung ke Google Sheets ({type(exc).__name__}): {msg[:240]}"
+
+
 def test_connection(db_path: str | os.PathLike[str] | None = None, conn=None) -> dict[str, Any]:
     cfg = resolve_settings(db_path=db_path, conn=conn)
     if cfg["credentials_error"]:
@@ -342,16 +357,7 @@ def test_connection(db_path: str | os.PathLike[str] | None = None, conn=None) ->
             "spreadsheet_id": cfg["spreadsheet_id"],
         }
     except Exception as exc:
-        msg = str(exc)
-        if "403" in msg or "permission" in msg.lower():
-            email = cfg["service_account_email"] or "service account"
-            return {
-                "ok": False,
-                "message": f"Akses ditolak (403). Pastikan Spreadsheet sudah di-Share ke {email} sebagai Editor.",
-            }
-        if "404" in msg or "not found" in msg.lower():
-            return {"ok": False, "message": "Spreadsheet tidak ditemukan (404). Periksa kembali URL atau ID Spreadsheet."}
-        return {"ok": False, "message": f"Gagal terhubung ke Google Sheets: {msg}"}
+        return {"ok": False, "message": _friendly_google_error(exc, cfg.get("service_account_email"))}
 
 
 def _ensure_tab(service, spreadsheet_id: str, tab: str, known_tabs: dict[str, int]) -> None:
@@ -479,19 +485,11 @@ def sync_schools(
             "message": None,
         }
     except Exception as exc:  # jangan crash: kembalikan status error yang aman
-        msg = str(exc)
-        if "403" in msg or "permission" in msg.lower():
-            email = cfg.get("service_account_email") or "service account"
-            friendly = f"Akses ditolak (403). Pastikan Spreadsheet sudah di-Share ke {email} sebagai Editor dan Google Sheets API aktif."
-        elif "404" in msg or "not found" in msg.lower():
-            friendly = "Spreadsheet tidak ditemukan (404). Periksa kembali URL atau ID Spreadsheet."
-        else:
-            friendly = f"Sinkron Sheets gagal ({type(exc).__name__}): {msg[:220]}"
         return {
             "status": "error",
             "synced_schools": 0,
             "rows_upserted": 0,
-            "message": friendly,
+            "message": _friendly_google_error(exc, cfg.get("service_account_email")),
         }
     finally:
         conn.close()

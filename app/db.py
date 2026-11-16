@@ -536,9 +536,9 @@ def audit(
             action,
             entity_type,
             str(entity_id),
-            json.dumps(old_value) if old_value is not None else None,
-            json.dumps(new_value) if new_value is not None else None,
-            json.dumps(metadata) if metadata is not None else None,
+            json.dumps(old_value, default=str) if old_value is not None else None,
+            json.dumps(new_value, default=str) if new_value is not None else None,
+            json.dumps(metadata, default=str) if metadata is not None else None,
         ),
     )
 

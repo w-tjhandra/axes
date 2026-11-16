@@ -815,7 +815,15 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
                 exam_id,
             ),
         )
-        db.audit(conn, user["id"], "exam_update", "exam", exam_id, old_value, changes)
+        db.audit(
+            conn,
+            user["id"],
+            "exam_update",
+            "exam",
+            exam_id,
+            old_value,
+            body.model_dump(mode="json", exclude_unset=True),
+        )
         conn.commit()
         return _exam_payload(conn, _resolve_exam(conn, exam_id))
 

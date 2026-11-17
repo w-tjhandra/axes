@@ -409,6 +409,11 @@ def assessment_full(conn: sqlite3.Connection, assessment) -> dict[str, Any]:
         "locked": assessment["status"] == "locked",
         "thresholds": {
             "pass_threshold": cfg_rules["pass_threshold"],
+            "unit_pass_percent": cfg_rules["pass_threshold"],
+            "technical_weight": cfg_rules["technical_weight"],
+            "knowledge_weight": cfg_rules["knowledge_weight"],
+            "final_pass_threshold": cfg_rules["final_pass_threshold"],
+            "min_sub_passed": cfg_rules["min_sub_passed"],
             "predicate_sangat_mahir": cfg_rules["predicate_sangat_mahir"],
             "predicate_mahir": cfg_rules["predicate_mahir"],
             "predicate_cakap": cfg_rules["predicate_cakap"],
@@ -1510,7 +1515,17 @@ def _register_config_routes(app: FastAPI, auth_ctx: Any) -> None:
         if conn.execute("SELECT 1 FROM scheme WHERE kode = ?", (scheme_kode,)).fetchone() is None:
             fail(404, "scheme_not_found")
         res = seed_data.apply_soal_pt_nusantara_digital(conn, scheme_kode)
-        db.bump_instrument_version(conn, scheme_kode)
+        new_ver = db.bump_instrument_version(conn, scheme_kode)
+        fresh_snap = json.dumps(db.get_snapshot(conn, scheme_kode), ensure_ascii=False)
+        conn.execute(
+            """
+            UPDATE assessment
+            SET instrument_version = ?, instrument_json = ?, updated_at = ?
+            WHERE status != 'locked'
+              AND participant_id IN (SELECT id FROM participant WHERE school_id IN (SELECT id FROM school WHERE scheme_kode = ?))
+            """,
+            (new_ver, fresh_snap, db.utcnow(), scheme_kode),
+        )
         db.audit(conn, user["id"], "apply_soal_preset", "scheme", scheme_kode, new_value=res)
         conn.commit()
         return res

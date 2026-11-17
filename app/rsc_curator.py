@@ -22,14 +22,14 @@ def _join_continuations(text: str) -> list[str]:
                 continue
             buf = stripped
         else:
-            buf = f"{buf} {stripped}"
+            buf = f"{buf}{line.lstrip()}"
         if buf.endswith("\\"):
-            buf = buf[:-1].rstrip()
+            buf = buf[:-1]
             continue
-        lines.append(buf)
+        lines.append(buf.strip())
         buf = ""
-    if buf:
-        lines.append(buf)
+    if buf.strip():
+        lines.append(buf.strip())
     return lines
 
 
@@ -207,7 +207,7 @@ def _match_indicator(unit_kode: str, text: str, check_by_key: dict[str, dict[str
         (["telnet", "ftp", "api-ssl"], "services"),
         (["queue-guest"], "queue_guest"),
         (["queue-mgmt-staff"], "queue_mgmt_staff"),
-        (["trunk", "tagged"], "switch_vlan"),
+        (["trunk", "tagged", "pada switch", "bridge vlan", "switch chip"], "switch_vlan"),
         (["access port", "vlan 30"], "switch_vlan"),
         (["nd-guest", "wpa2", "max-station"], "wireless_ap"),
         ([".rsc", "export configuration"], "rsc_export"),
@@ -342,20 +342,25 @@ def curate_rsc(
     fw_cmds = _find(all_commands, "/ip firewall filter")
     fw_by_comment = {c["params"].get("comment", "").upper(): c for c in fw_cmds if c["params"].get("comment")}
     fw_specs = [
-        ("fw_guest_mgmt", "FW-BLOCK-GUEST-TO-MGMT", "drop"),
-        ("fw_guest_staff", "FW-BLOCK-GUEST-TO-STAFF", "drop"),
-        ("fw_staff_mgmt", "FW-BLOCK-STAFF-TO-MGMT", "drop"),
-        ("fw_winbox_allow", "FW-ALLOW-WINBOX-MGMT", "accept"),
-        ("fw_winbox_drop", "FW-DROP-WINBOX-OTHERS", "drop"),
+        ("fw_guest_mgmt", "FW-BLOCK-GUEST-TO-MGMT", "drop", "forward"),
+        ("fw_guest_staff", "FW-BLOCK-GUEST-TO-STAFF", "drop", "forward"),
+        ("fw_staff_mgmt", "FW-BLOCK-STAFF-TO-MGMT", "drop", "forward"),
+        ("fw_winbox_allow", "FW-ALLOW-WINBOX-MGMT", "accept", "input"),
+        ("fw_winbox_drop", "FW-DROP-WINBOX-OTHERS", "drop", "input"),
     ]
     fw_matched = 0
-    for key, cname, expected_act in fw_specs:
+    for key, cname, expected_act, expected_chain in fw_specs:
         rule = fw_by_comment.get(cname)
-        if rule and rule["params"].get("action", "accept") == expected_act:
-            fw_matched += 1
-            checks.append(_make_check(key, f"Firewall {cname}", "J.611000.006.01", "pass", 3, f"Rule {cname} (action={expected_act}) ditemukan.", rule["raw"]))
-        elif rule:
-            checks.append(_make_check(key, f"Firewall {cname}", "J.611000.006.01", "partial", 1, f"Rule {cname} ada, tetapi action={rule['params'].get('action')} (seharusnya {expected_act}).", rule["raw"]))
+        if rule:
+            act = rule["params"].get("action", "accept")
+            chain = rule["params"].get("chain", "")
+            disabled = rule["params"].get("disabled") == "yes"
+            if act == expected_act and not disabled and (not chain or chain == expected_chain):
+                fw_matched += 1
+                checks.append(_make_check(key, f"Firewall {cname}", "J.611000.006.01", "pass", 3, f"Rule {cname} (chain={chain or expected_chain}, action={act}) aktif.", rule["raw"]))
+            else:
+                reason = "rule masih disabled=yes" if disabled else f"chain={chain}, action={act} (seharusnya chain={expected_chain}, action={expected_act})"
+                checks.append(_make_check(key, f"Firewall {cname}", "J.611000.006.01", "partial", 1, f"Rule {cname} ditemukan tetapi {reason}.", rule["raw"]))
         else:
             checks.append(_make_check(key, f"Firewall {cname}", "J.611000.006.01", "fail", 0, f"Rule {cname} tidak ditemukan."))
     checks.append(

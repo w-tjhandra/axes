@@ -158,12 +158,17 @@ def _result_for(conn, assessment_row, config: dict[str, Any]) -> dict[str, Any] 
         (assessment_row["participant_id"],),
     ).fetchone()
     label = rules.participant_label(participant["nama"], participant["nomor"])
+    merged_cfg = {
+        **config,
+        **(snapshot.get("thresholds") or {}),
+        "scheme_nama": snapshot.get("scheme_nama") or config.get("scheme_nama", "Junior Network Technician"),
+    }
     return rules.compute_result(
         snapshot.get("units", []),
         snapshot.get("sub_competencies", []),
         scores,
         label,
-        config,
+        merged_cfg,
     )
 
 
@@ -198,6 +203,15 @@ def _technical_avg(result: dict[str, Any] | None) -> float | str:
     return ""
 
 
+def _safe_sheet_text(val: Any, preserve_leading_zero: bool = False) -> str:
+    text = str(val if val is not None else "").strip()
+    if not text:
+        return ""
+    if text[0] in {"=", "+", "-", "@"} or (preserve_leading_zero and text.startswith("0") and len(text) > 1):
+        return f"'{text}"
+    return text
+
+
 def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list[str], list[list[Any]], dict[str, Any]]:
     school = conn.execute("SELECT * FROM school WHERE id = ?", (school_id,)).fetchone()
     scheme_kode = school["scheme_kode"] if school else db.DEFAULT_SCHEME_KODE
@@ -217,15 +231,16 @@ def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list
                 percent_by_code.get(code, "") for code in [u["kode"] for u in snapshot.get("units", [])]
             ]
         sub_text = ""
-        if result and result.get("selected_sub"):
-            sub_text = result["selected_sub"]["judul"]
-        elif result:
-            sub_text = "; ".join(s["judul"] for s in result.get("sub_fulfilled", []))
+        if result and result.get("outcome") in {"kompeten_penuh", "kompeten_sub"}:
+            if result.get("selected_sub"):
+                sub_text = result["selected_sub"]["judul"]
+            else:
+                sub_text = "; ".join(s["judul"] for s in result.get("sub_fulfilled", []))
         rows.append(
             [
-                participant["nomor"],
-                participant["nama"],
-                participant["kelas"] or "",
+                _safe_sheet_text(participant["nomor"], preserve_leading_zero=True),
+                _safe_sheet_text(participant["nama"]),
+                _safe_sheet_text(participant["kelas"]),
                 assessment["status"] if assessment else "belum_mulai",
                 *unit_values,
                 ", ".join(result.get("unit_passed", [])) if result else "",
@@ -302,23 +317,25 @@ def _rows_for_exam_school(
             unit["kode"]: unit.get("percent", "")
             for unit in (result or {}).get("unit_results", [])
         }
-        selected_sub = (result or {}).get("selected_sub")
-        sub_text = (
-            selected_sub["judul"]
-            if selected_sub
-            else "; ".join(sub["judul"] for sub in (result or {}).get("sub_fulfilled", []))
-        )
+        sub_text = ""
+        if result and result.get("outcome") in {"kompeten_penuh", "kompeten_sub"}:
+            selected_sub = result.get("selected_sub")
+            sub_text = (
+                selected_sub["judul"]
+                if selected_sub
+                else "; ".join(sub["judul"] for sub in result.get("sub_fulfilled", []))
+            )
         rows.append(
             [
                 f"{exam_id}:{enrollment['id']}",
                 exam_id,
-                exam["title"],
+                _safe_sheet_text(exam["title"]),
                 exam["year"],
-                enrollment["snapshot_school_name"],
-                enrollment["snapshot_number"],
-                enrollment["snapshot_name"],
-                enrollment["snapshot_class"],
-                enrollment["group_label"],
+                _safe_sheet_text(enrollment["snapshot_school_name"]),
+                _safe_sheet_text(enrollment["snapshot_number"], preserve_leading_zero=True),
+                _safe_sheet_text(enrollment["snapshot_name"]),
+                _safe_sheet_text(enrollment["snapshot_class"]),
+                _safe_sheet_text(enrollment["group_label"]),
                 enrollment["scheme_kode"],
                 enrollment["status"],
                 (assessment or {}).get("status", "belum_mulai"),
@@ -488,11 +505,12 @@ def sync_schools(
                 .execute()
                 .get("values", [])
             )
-            existing_rows = {
-                str(row[0]).strip(): index + 2
-                for index, row in enumerate(existing_values)
-                if row and str(row[0]).strip()
-            }
+            existing_rows: dict[str, int] = {}
+            for index, row in enumerate(existing_values):
+                if row and str(row[0]).strip():
+                    raw_k = str(row[0]).strip().lstrip("'")
+                    existing_rows[raw_k] = index + 2
+                    existing_rows.setdefault(raw_k.lstrip("0") or "0", index + 2)
 
             know_idx = headers.index("Nilai Knowledge") + 1
             col_failed = _column_letter(know_idx - 3)
@@ -513,8 +531,8 @@ def sync_schools(
             last_col = _column_letter(len(headers))
             next_row = max(existing_rows.values(), default=1) + 1
             for row in rows:
-                nomor = str(row[0]).strip()
-                row_index = existing_rows.get(nomor)
+                nomor_raw = str(row[0]).strip().lstrip("'")
+                row_index = existing_rows.get(nomor_raw) or existing_rows.get(nomor_raw.lstrip("0") or "0")
                 target_r = row_index if row_index else next_row
                 formula_total = f'=IF({col_tech}{target_r}="","",({col_tech}{target_r}*{tech_w})+(N({col_know}{target_r})*{know_w}))'
                 formula_status = f'=IF({col_total}{target_r}="","",IF(AND({col_total}{target_r}>{final_thresh},{col_sub}{target_r}<>""),"Kompeten","Tidak Kompeten"))'
@@ -529,7 +547,7 @@ def sync_schools(
                     data.append({"range": f"'{escaped_tab}'!{col_total}{target_r}:{last_col}{target_r}", "values": [row_with_formulas[know_idx:]]})
                 else:
                     data.append({"range": f"'{escaped_tab}'!A{target_r}:{last_col}{target_r}", "values": [row_with_formulas]})
-                    existing_rows[nomor] = target_r
+                    existing_rows[nomor_raw] = target_r
                     next_row += 1
                 rows_upserted += 1
             service.spreadsheets().values().batchUpdate(

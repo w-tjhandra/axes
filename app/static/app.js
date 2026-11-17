@@ -2531,7 +2531,7 @@ function renderAssessmentView(data) {
 function unitHtml(unit, index, locked) {
   const stats = computeUnitStats(unit);
   const open = state.openUnits.has(unit.kode);
-  const threshold = state.assessment?.thresholds?.unit_pass_percent ?? 70;
+  const threshold = state.assessment?.thresholds?.pass_threshold ?? state.assessment?.thresholds?.unit_pass_percent ?? 70;
   return `
     <details class="unit-card card ${open ? 'open' : ''}" data-unit="${esc(unit.kode)}" ${open ? 'open' : ''}>
       <summary class="unit-head" data-toggle-unit="${esc(unit.kode)}" aria-expanded="${open}">
@@ -2663,12 +2663,11 @@ function openRscCurateModal() {
         if (!lastReport || !lastReport.suggested_scores) return;
         let applied = 0;
         Object.entries(lastReport.suggested_scores).forEach(([kode, item]) => {
-          setScore(kode, Number(item.score));
           const noteInput = document.querySelector(`[data-note="${kode}"]`);
           if (noteInput && !noteInput.value && item.note) {
             noteInput.value = item.note;
-            queueScore(kode, Number(item.score), item.note);
           }
+          setScore(kode, Number(item.score));
           applied += 1;
         });
         close();
@@ -2745,7 +2744,7 @@ function computeUnitStats(unit) {
   });
   const n = unit.indicators.length;
   const percent = n ? Math.round((total / (3 * n)) * 10000) / 100 : 0;
-  const threshold = Number(state.assessment?.thresholds?.unit_pass_percent ?? 70);
+  const threshold = Number(state.assessment?.thresholds?.pass_threshold ?? state.assessment?.thresholds?.unit_pass_percent ?? 70);
   const passed = n > 0 && (threshold === 70 ? total * 10 >= 21 * n : percent >= threshold);
   return {
     total,
@@ -2809,6 +2808,9 @@ function computePreview() {
   const average = passed.length
     ? Math.round((passed.reduce((sum, unit) => sum + unit.percent, 0) / passed.length) * 100) / 100
     : null;
+  const totalScore = units.reduce((sum, u) => sum + u.total, 0);
+  const maxScore = units.reduce((sum, u) => sum + u.max, 0);
+  const technicalPercent = maxScore > 0 ? Math.round((totalScore / maxScore) * 10000) / 100 : 0;
   const predicate = outcome !== 'belum_kompeten' ? predicateFor(average) : null;
   const labels = {
     kompeten_penuh: 'Kompeten Penuh',
@@ -2817,7 +2819,7 @@ function computePreview() {
     belum_kompeten: 'Belum Kompeten',
   };
   const participant = state.assessment.assessment.participant;
-  const schemeNama = state.assessment.scheme?.nama || 'Junior Network Technician';
+  const schemeNama = state.assessment.assessment?.scheme_nama || state.assessment.scheme?.nama || 'Junior Network Technician';
   const peserta = `${participant.nama} (${participant.nomor})`;
   let statement;
   if (outcome === 'kompeten_penuh') {
@@ -2835,6 +2837,7 @@ function computePreview() {
     outcome_label: labels[outcome],
     predicate,
     average_percent: average,
+    technical_percent: technicalPercent,
     unit_passed: passed.map((unit) => unit.kode),
     unit_failed: units.filter((unit) => !unit.passed).map((unit) => unit.kode),
     unit_results: units,
@@ -2857,6 +2860,7 @@ function updateResultPanel() {
     <div class="panel-label">${locked ? 'Hasil final' : 'Hasil sementara'}</div>
     <div class="outcome">${esc(result.outcome_label)}</div>
     <div class="predicate-line">${result.predicate ? `Predikat <strong>${esc(result.predicate)}</strong>` : 'Predikat belum ada'}</div>
+    <div class="avg-line">Nilai teknis (avg): <strong>${fmtPercent(result.technical_percent ?? 0)}</strong></div>
     <div class="avg-line">Rata-rata unit lulus: ${result.average_percent == null ? '—' : fmtPercent(result.average_percent)}</div>
     ${selected ? `<div class="avg-line">${esc(selected)}</div>` : ''}
     <div class="statement-box"><p data-statement-text>${esc(result.statement)}</p></div>
@@ -2876,7 +2880,7 @@ function updateUnitDom(kode) {
   const stats = computeUnitStats(unit);
   const card = document.querySelector(`[data-unit="${kode}"]`);
   if (!card) return;
-  const threshold = state.assessment?.thresholds?.unit_pass_percent ?? 70;
+  const threshold = state.assessment?.thresholds?.pass_threshold ?? state.assessment?.thresholds?.unit_pass_percent ?? 70;
   const metrics = card.querySelector('.unit-head-metrics');
   metrics.innerHTML = `
     <div class="progress"><div class="progress-bar ${stats.passed ? '' : 'fail'}" style="width:${stats.percent}%"></div><span class="progress-marker"></span></div>

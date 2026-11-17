@@ -75,13 +75,17 @@ def test_seed_persis_tabel_5_2_dan_total_61_indikator():
     assert mapping == {
         "SK-01": ["J.611000.003.02", "J.611000.004.01"],
         "SK-02": [
-            "J.611000.008.02",
             "J.611000.009.02",
             "J.611000.010.02",
             "J.611000.011.02",
         ],
-        "SK-03": ["J.611000.004.01", "J.611000.011.02", "J.611000.012.02"],
-        "SK-04": ["J.611000.006.01", "J.611000.015.02", "J.611000.020.01"],
+        "SK-03": [
+            "J.611000.009.02",
+            "J.611000.011.02",
+            "J.611000.012.02",
+            "J.611000.022.01",
+        ],
+        "SK-04": ["J.611000.006.01", "J.611000.011.02", "J.611000.012.02"],
         "SK-05": ["J.611000.017.01", "J.611000.018.02", "J.611000.022.01"],
     }
 
@@ -135,6 +139,8 @@ def test_sub_dipilih_rata_rata_tertinggi():
     scores = zero_scores(units)
     fill_unit(scores, units, "J.611000.003.02")
     fill_unit(scores, units, "J.611000.004.01")
+    fill_unit(scores, units, "J.611000.009.02")
+    fill_unit(scores, units, "J.611000.022.01")
     unit_011 = next(u for u in units if u["kode"] == "J.611000.011.02")
     for index, ind in enumerate(unit_011["indicators"]):
         scores[ind["kode"]] = 3 if index < 2 else 2
@@ -148,6 +154,27 @@ def test_sub_dipilih_rata_rata_tertinggi():
     sk03 = next(s for s in result["sub_competencies"] if s["kode"] == "SK-03")
     assert sk03["fulfilled"] is True
     assert sk03["average_percent"] < 100.0
+
+
+def test_kombinasi_praktik_masuk_sk02_sk03_sk04():
+    units = build_units()
+    subs = build_subs()
+
+    # Kasus 1: 009.02, 011.02, 012.02, 006.01, 022.01 -> memenuhi SK-03 dan SK-04
+    scores_1 = zero_scores(units)
+    for kode in ["J.611000.009.02", "J.611000.011.02", "J.611000.012.02", "J.611000.006.01", "J.611000.022.01"]:
+        fill_unit(scores_1, units, kode)
+    res_1 = rules.compute_result(units, subs, scores_1, "Andi (01)")
+    assert res_1["outcome"] == "kompeten_sub"
+    assert {"SK-03", "SK-04"} <= {s["kode"] for s in res_1["sub_fulfilled"]}
+
+    # Kasus 2: 009.02, 010.02, 011.02, 012.02, 022.01 -> memenuhi SK-02 dan SK-03
+    scores_2 = zero_scores(units)
+    for kode in ["J.611000.009.02", "J.611000.010.02", "J.611000.011.02", "J.611000.012.02", "J.611000.022.01"]:
+        fill_unit(scores_2, units, kode)
+    res_2 = rules.compute_result(units, subs, scores_2, "Budi (02)")
+    assert res_2["outcome"] == "kompeten_sub"
+    assert {"SK-02", "SK-03"} <= {s["kode"] for s in res_2["sub_fulfilled"]}
 
 
 def test_unit_lulus_tanpa_sub_jadi_belum_kompeten():

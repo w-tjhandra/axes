@@ -254,7 +254,6 @@ SUB_COMPETENCIES: list[tuple[str, str, int, list[str]]] = [
         "Teknisi Instalasi Jaringan",
         2,
         [
-            "J.611000.008.02",
             "J.611000.009.02",
             "J.611000.010.02",
             "J.611000.011.02",
@@ -264,13 +263,18 @@ SUB_COMPETENCIES: list[tuple[str, str, int, list[str]]] = [
         "SK-03",
         "Teknisi Konfigurasi Jaringan",
         3,
-        ["J.611000.004.01", "J.611000.011.02", "J.611000.012.02"],
+        [
+            "J.611000.009.02",
+            "J.611000.011.02",
+            "J.611000.012.02",
+            "J.611000.022.01",
+        ],
     ),
     (
         "SK-04",
         "Teknisi Keamanan & Trafik Jaringan",
         4,
-        ["J.611000.006.01", "J.611000.015.02", "J.611000.020.01"],
+        ["J.611000.006.01", "J.611000.011.02", "J.611000.012.02"],
     ),
     (
         "SK-05",
@@ -592,6 +596,23 @@ def apply_soal_pt_nusantara_digital(
                 (stamp, extra["kode"]),
             )
         updated_units += 1
+
+    if scheme_kode == DEFAULT_SCHEME_KODE:
+        for sub_kode, judul, urutan, unit_kodes in SUB_COMPETENCIES:
+            conn.execute(
+                """
+                INSERT INTO sub_competency (kode, scheme_kode, judul, urutan, version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(kode) DO UPDATE SET judul = excluded.judul, urutan = excluded.urutan, updated_at = excluded.updated_at
+                """,
+                (sub_kode, scheme_kode, judul, urutan, stamp, stamp),
+            )
+            conn.execute("DELETE FROM sub_competency_unit WHERE sub_competency_kode = ?", (sub_kode,))
+            for unit_kode in unit_kodes:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sub_competency_unit (sub_competency_kode, unit_kode) VALUES (?, ?)",
+                    (sub_kode, unit_kode),
+                )
 
     conn.execute(
         "UPDATE scheme SET deskripsi = ?, updated_at = ? WHERE kode = ?",

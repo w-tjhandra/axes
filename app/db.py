@@ -455,6 +455,83 @@ def _migrate_scheme_weights(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_jnt_sub_competencies(conn: sqlite3.Connection) -> None:
+    if get_config(conn, "jnt_sub_v2_migrated") == "1":
+        return
+    try:
+        from . import rules
+        from .seed_data import SUB_COMPETENCIES
+    except ImportError:  # pragma: no cover
+        import rules  # type: ignore[no-redef]
+        from seed_data import SUB_COMPETENCIES  # type: ignore[no-redef]
+
+    stamp = utcnow()
+    subs_payload: list[dict[str, Any]] = []
+    for sub_kode, judul, urutan, unit_kodes in SUB_COMPETENCIES:
+        conn.execute(
+            """
+            INSERT INTO sub_competency (kode, scheme_kode, judul, urutan, version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(kode) DO UPDATE SET judul = excluded.judul, urutan = excluded.urutan, updated_at = excluded.updated_at
+            """,
+            (sub_kode, DEFAULT_SCHEME_KODE, judul, urutan, stamp, stamp),
+        )
+        conn.execute("DELETE FROM sub_competency_unit WHERE sub_competency_kode = ?", (sub_kode,))
+        for unit_kode in unit_kodes:
+            conn.execute(
+                "INSERT OR IGNORE INTO sub_competency_unit (sub_competency_kode, unit_kode) VALUES (?, ?)",
+                (sub_kode, unit_kode),
+            )
+        subs_payload.append({"kode": sub_kode, "judul": judul, "urutan": urutan, "unit_kodes": list(unit_kodes)})
+
+    cfg_all = all_config(conn)
+    rows = conn.execute(
+        """
+        SELECT a.*, p.nama AS p_nama, p.nomor AS p_nomor
+        FROM assessment a
+        JOIN participant p ON p.id = a.participant_id
+        JOIN school s ON s.id = p.school_id
+        WHERE s.scheme_kode = ?
+        """,
+        (DEFAULT_SCHEME_KODE,),
+    ).fetchall()
+    for a in rows:
+        snap = json.loads(a["instrument_json"])
+        snap["sub_competencies"] = subs_payload
+        snap_json = json.dumps(snap, ensure_ascii=False)
+        if a["status"] == "locked":
+            scores = {
+                r["indicator_kode"]: r["value"]
+                for r in conn.execute("SELECT indicator_kode, value FROM score WHERE assessment_id = ?", (a["id"],))
+            }
+            merged_cfg = {
+                **cfg_all,
+                **(snap.get("thresholds") or {}),
+                "scheme_nama": snap.get("scheme_nama") or "Junior Network Technician",
+            }
+            res = rules.compute_result(
+                snap.get("units", []),
+                subs_payload,
+                scores,
+                rules.participant_label(a["p_nama"], a["p_nomor"]),
+                merged_cfg,
+            )
+            conn.execute(
+                "UPDATE assessment SET instrument_json = ?, result_json = ?, updated_at = ? WHERE id = ?",
+                (snap_json, json.dumps(res, ensure_ascii=False), stamp, a["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE assessment SET instrument_json = ?, updated_at = ? WHERE id = ?",
+                (snap_json, stamp, a["id"]),
+            )
+
+    set_config(conn, "jnt_sub_v2_migrated", "1")
+    if rows:
+        set_config(conn, "sheets_dirty", "1")
+    conn.commit()
+
+
 def init_db(path: str | os.PathLike[str] | None = None) -> Path:
     try:
         from .seed_data import seed
@@ -468,6 +545,7 @@ def init_db(path: str | os.PathLike[str] | None = None) -> Path:
         _migrate_annual_exams(conn)
         _migrate_scheme_weights(conn)
         seed(conn)
+        _migrate_jnt_sub_competencies(conn)
     return db_path
 
 

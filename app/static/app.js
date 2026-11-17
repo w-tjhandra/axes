@@ -2507,6 +2507,7 @@ function renderAssessmentView(data) {
         <p class="sub muted">${schemeBadge(schemeKode)} · ${esc(participant.kelas || '—')} · Instrumen v${esc(data.assessment.instrument_version)} · ${statusBadge(data.assessment.status)}</p>
       </div>
       <div class="head-actions">
+        <button class="btn primary" id="curate-rsc-btn" type="button" ${data.locked ? 'disabled' : ''}>Kurasi .rsc MikroTik</button>
         <button class="btn" id="save-now" type="button">Sinkron sekarang</button>
         <a class="btn ghost" href="#/schools/${school.id}/results">Hasil sekolah</a>
       </div>
@@ -2580,6 +2581,103 @@ function indicatorHtml(indicator, locked) {
     </div>`;
 }
 
+function openRscCurateModal() {
+  if (!state.assessment || state.assessment.locked) return;
+  let lastReport = null;
+
+  openModal({
+    title: 'Kurasi File Export .rsc MikroTik',
+    body: `
+      <form id="rsc-curate-form">
+        <div class="field">
+          <label for="rsc-files-input">Pilih file .rsc MikroTik (bisa pilih Router + Switch + AP sekaligus)</label>
+          <input id="rsc-files-input" type="file" accept=".rsc,.txt" multiple>
+          <p class="hint" style="margin-top:4px">Sistem memeriksa Identity, VLSM, VLAN 10/20/30, DHCP, NAT, Firewall, Security, Queue, Switch, dan AP sesuai soal PT Nusantara Digital.</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <button type="button" class="btn primary" id="run-rsc-curate">Analisis .rsc</button>
+          <button type="button" class="btn success hidden" id="apply-rsc-scores">Terapkan Skor Rekomendasi</button>
+        </div>
+        <p id="rsc-curate-error" class="error-text" role="alert"></p>
+        <div id="rsc-curate-result" style="margin-top:12px"></div>
+      </form>`,
+    actions: [{ label: 'Tutup', className: 'ghost' }],
+    onMount: (root, close) => {
+      const fileInput = root.querySelector('#rsc-files-input');
+      const runBtn = root.querySelector('#run-rsc-curate');
+      const applyBtn = root.querySelector('#apply-rsc-scores');
+      const errEl = root.querySelector('#rsc-curate-error');
+      const resultEl = root.querySelector('#rsc-curate-result');
+
+      runBtn.addEventListener('click', async () => {
+        const files = [...(fileInput.files || [])];
+        errEl.textContent = '';
+        if (!files.length) {
+          errEl.textContent = 'Pilih minimal satu file .rsc terlebih dahulu.';
+          return;
+        }
+        const formData = new FormData();
+        files.forEach((f) => formData.append('files', f));
+        runBtn.disabled = true;
+        runBtn.textContent = 'Menganalisis...';
+        try {
+          const response = await fetch(`/api/assessments/${state.assessment.assessment.id}/curate-rsc`, {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'fetch' },
+            body: formData,
+            credentials: 'same-origin',
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.message || data.error || 'Gagal mengkurasi file .rsc');
+          lastReport = data;
+          const sum = data.summary || {};
+          const badgeFor = (s) => s === 'pass' ? '<span class="badge success">SESUAI (3)</span>' : s === 'partial' ? '<span class="badge warning">PARSIAL</span>' : '<span class="badge danger">GAGAL (0)</span>';
+          resultEl.innerHTML = `
+            <div class="card" style="padding:12px;margin-bottom:10px;background:var(--surface-2)">
+              <strong>Kesesuaian Konfigurasi: ${sum.match_percent}%</strong>
+              <div class="muted" style="font-size:0.84rem;margin-top:4px">
+                ${sum.passed} sesuai · ${sum.partial} parsial · ${sum.failed} tidak ditemukan · ${sum.suggested_indicators} indikator siap diisi otomatis
+              </div>
+            </div>
+            <div style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:8px">
+              ${(data.checks || []).map((c) => `
+                <div style="border:1px solid var(--border);border-radius:10px;padding:10px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+                    <strong>${esc(c.label)}</strong>
+                    ${badgeFor(c.status)}
+                  </div>
+                  <div class="muted" style="font-size:0.83rem;margin-top:4px">${esc(c.detail)}</div>
+                  ${c.evidence ? `<div class="mono" style="font-size:0.75rem;margin-top:4px;opacity:0.8;word-break:break-all">${esc(c.evidence)}</div>` : ''}
+                </div>`).join('')}
+            </div>`;
+          applyBtn.classList.toggle('hidden', !Object.keys(data.suggested_scores || {}).length);
+        } catch (err) {
+          errEl.textContent = err.message;
+        } finally {
+          runBtn.disabled = false;
+          runBtn.textContent = 'Analisis .rsc';
+        }
+      });
+
+      applyBtn.addEventListener('click', () => {
+        if (!lastReport || !lastReport.suggested_scores) return;
+        let applied = 0;
+        Object.entries(lastReport.suggested_scores).forEach(([kode, item]) => {
+          setScore(kode, Number(item.score));
+          const noteInput = document.querySelector(`[data-note="${kode}"]`);
+          if (noteInput && !noteInput.value && item.note) {
+            noteInput.value = item.note;
+            queueScore(kode, Number(item.score), item.note);
+          }
+          applied += 1;
+        });
+        close();
+        toast(`${applied} indikator diisi otomatis dari hasil kurasi .rsc. Periksa kembali lalu kunci bila selesai.`, 'success');
+      });
+    },
+  });
+}
+
 function bindAssessmentEvents() {
   const view = document.querySelector('#view');
   if (view.dataset.assessmentBound === '1') return;
@@ -2588,6 +2686,10 @@ function bindAssessmentEvents() {
     const scoreButton = event.target.closest('[data-score]');
     if (scoreButton && !scoreButton.disabled) {
       setScore(scoreButton.dataset.score, Number(scoreButton.dataset.value));
+      return;
+    }
+    if (event.target.closest('#curate-rsc-btn')) {
+      openRscCurateModal();
       return;
     }
     if (event.target.closest('#save-now')) {
@@ -3196,6 +3298,7 @@ async function renderConfig() {
       </div>
       <div class="head-actions">
         <select id="config-scheme-select" class="select-sm" aria-label="Pilih skema instrumen">${schemeOptions}</select>
+        ${schemeKode === 'JNT-SMK' ? '<button class="btn" id="apply-soal-preset" type="button">Sesuaikan Soal Nusantara Digital</button>' : ''}
         <button class="btn" id="add-unit" type="button">Tambah unit</button>
         <button class="btn primary" id="add-sub" type="button">Tambah sub kompetensi</button>
       </div>
@@ -3227,6 +3330,15 @@ async function renderConfig() {
     state.configScheme = e.target.value;
     localStorage.setItem('ukk-config-scheme', state.configScheme);
     await renderConfig();
+  });
+  document.querySelector('#apply-soal-preset')?.addEventListener('click', async () => {
+    try {
+      await api(`/config/schemes/${encodeURIComponent(schemeKode)}/apply-soal-preset`, { method: 'POST', body: {} });
+      toast('Instrumen JNT-SMK disesuaikan ke Soal PT Nusantara Digital (Full MikroTik).', 'success');
+      await renderConfig();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
   });
   document.querySelector('#add-unit').addEventListener('click', () => openUnitModal());
   document.querySelector('#add-sub').addEventListener('click', () => openSubModal());

@@ -519,3 +519,86 @@ def seed(conn: sqlite3.Connection) -> None:
             (key, json.dumps(value), stamp),
         )
     conn.commit()
+
+
+NUSANTARA_DIGITAL_UNIT_INDICATORS: dict[str, list[str]] = {
+    "J.611000.012.02": [
+        "VLAN 10/20/30 dibuat pada switch MikroTik (Bridge VLAN Filtering / Switch Chip).",
+        "Port trunk ke router MikroTik membawa VLAN 10/20/30 tagged.",
+        "Port access switch MikroTik dikonfigurasi sesuai denah: Management (VLAN 10), Staff (VLAN 20), AP (VLAN 30).",
+        "Konfigurasi switch MikroTik diverifikasi dan trafik tiap segmen berjalan.",
+    ],
+    "J.611000.006.01": [
+        "Comment rule menggunakan format FW-[FUNGSI] secara konsisten.",
+        "Rule FW-BLOCK-GUEST-TO-MGMT aktif dan terbukti berfungsi.",
+        "Rule FW-BLOCK-GUEST-TO-STAFF aktif dan terbukti berfungsi.",
+        "Rule FW-BLOCK-STAFF-TO-MGMT aktif dan terbukti berfungsi.",
+        "Rule FW-ALLOW-WINBOX-MGMT (port 8291 dari Management) aktif.",
+        "Rule FW-DROP-WINBOX-OTHERS (port 8291 dari selain Management) aktif.",
+        "User baru UKK[NO_ABSEN] dengan password 123 berhasil dibuat.",
+        "User admin default dinonaktifkan atau password-nya diganti.",
+        "Service tidak terpakai (telnet, ftp, www, api, api-ssl) dinonaktifkan; winbox dan ssh tetap aktif.",
+    ],
+    "J.611000.015.02": [
+        "Ping gateway tiap VLAN dan ke 1.1.1.1 berhasil, serta cek DHCP tiap VLAN tidak keluar range.",
+        "Ping Guest ke Management dan Staff ke Management gagal sesuai firewall.",
+        "Winbox dari Guest gagal (diblokir firewall).",
+    ],
+    "J.611000.020.01": [
+        "QUEUE-GUEST terpasang dengan max-limit 2M/2M.",
+        "QUEUE-MGMT-STAFF terpasang dengan max-limit 8M/8M.",
+        "Limit bandwidth (Guest 2M, Management+Staff 8M) diverifikasi dan dicatat pada report sheet.",
+    ],
+}
+
+
+def apply_soal_pt_nusantara_digital(
+    conn: sqlite3.Connection, scheme_kode: str = DEFAULT_SCHEME_KODE
+) -> dict[str, Any]:
+    """Sesuaikan indikator skema agar 100% mengikuti soal UKK PT Nusantara Digital (Full MikroTik)."""
+    from datetime import datetime, timezone
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    updated_units = 0
+    for unit_kode, texts in NUSANTARA_DIGITAL_UNIT_INDICATORS.items():
+        unit_row = conn.execute(
+            "SELECT kode FROM unit WHERE kode = ? AND scheme_kode = ?", (unit_kode, scheme_kode)
+        ).fetchone()
+        if unit_row is None:
+            continue
+        existing = conn.execute(
+            "SELECT kode, urutan FROM indicator WHERE unit_kode = ? ORDER BY urutan, kode",
+            (unit_kode,),
+        ).fetchall()
+        for idx, teks in enumerate(texts, start=1):
+            if idx <= len(existing):
+                conn.execute(
+                    "UPDATE indicator SET teks = ?, urutan = ?, aktif = 1, is_proposed = 0, updated_at = ? WHERE kode = ?",
+                    (teks, idx, stamp, existing[idx - 1]["kode"]),
+                )
+            else:
+                new_kode = f"JNT-{unit_kode.split('.')[-2]}-{idx:02d}"
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO indicator
+                        (kode, unit_kode, teks, urutan, aktif, is_proposed, version, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 1, 0, 1, ?, ?)
+                    """,
+                    (new_kode, unit_kode, teks, idx, stamp, stamp),
+                )
+        for extra in existing[len(texts) :]:
+            conn.execute(
+                "UPDATE indicator SET aktif = 0, updated_at = ? WHERE kode = ?",
+                (stamp, extra["kode"]),
+            )
+        updated_units += 1
+
+    conn.execute(
+        "UPDATE scheme SET deskripsi = ?, updated_at = ? WHERE kode = ?",
+        (
+            "Skema UKK TKJ Studi Kasus PT Nusantara Digital (Full MikroTik: Router, Switch, AP) — 13 Unit, 5 Sub-Kompetensi, Bobot 60% Teknis + 40% Knowledge (>65%).",
+            stamp,
+            scheme_kode,
+        ),
+    )
+    return {"scheme_kode": scheme_kode, "updated_units": updated_units}

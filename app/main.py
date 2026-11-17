@@ -26,14 +26,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 try:
-    from . import auth, backup, db, exams, recap, rules, sheets
+    from . import auth, backup, db, exams, recap, rsc_curator, rules, seed_data, sheets
 except ImportError:  # pragma: no cover
     import auth  # type: ignore[no-redef]
     import backup  # type: ignore[no-redef]
     import db  # type: ignore[no-redef]
     import exams  # type: ignore[no-redef]
     import recap  # type: ignore[no-redef]
+    import rsc_curator  # type: ignore[no-redef]
     import rules  # type: ignore[no-redef]
+    import seed_data  # type: ignore[no-redef]
     import sheets  # type: ignore[no-redef]
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1464,8 +1466,55 @@ def _register_assessment_routes(app: FastAPI, auth_ctx: Any) -> None:
         result = compute_assessment_result(conn, assessment)
         return {"locked": assessment["status"] == "locked", "locked_at": assessment["locked_at"], "result": result}
 
+    @app.post("/api/assessments/{assessment_id}/curate-rsc")
+    async def curate_assessment_rsc(
+        assessment_id: int,
+        files: list[UploadFile] = File(...),
+        ctx: tuple = Depends(auth_ctx),
+    ):
+        conn, user = ctx
+        assessment = conn.execute("SELECT * FROM assessment WHERE id = ?", (assessment_id,)).fetchone()
+        if assessment is None:
+            fail(404, "assessment_not_found")
+        if not files:
+            fail(400, "rsc_file_required", message="Pilih minimal satu file .rsc MikroTik.")
+        rsc_inputs: list[tuple[str, str]] = []
+        for upload in files:
+            raw = await upload.read()
+            if len(raw) > MAX_CSV_BYTES:
+                fail(413, "rsc_too_large", message=f"File {upload.filename} melebihi batas 2 MB.")
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1", errors="replace")
+            rsc_inputs.append((upload.filename or "export.rsc", text))
+
+        snapshot = json.loads(assessment["instrument_json"])
+        report = rsc_curator.curate_rsc(rsc_inputs, units=snapshot.get("units", []))
+        db.audit(
+            conn,
+            user["id"],
+            "rsc_curate",
+            "assessment",
+            assessment_id,
+            new_value={"files": report["files"], "summary": report["summary"]},
+        )
+        conn.commit()
+        return report
+
 
 def _register_config_routes(app: FastAPI, auth_ctx: Any) -> None:
+    @app.post("/api/config/schemes/{scheme_kode}/apply-soal-preset")
+    def apply_soal_preset(scheme_kode: str, ctx: tuple = Depends(auth_ctx)):
+        conn, user = ctx
+        if conn.execute("SELECT 1 FROM scheme WHERE kode = ?", (scheme_kode,)).fetchone() is None:
+            fail(404, "scheme_not_found")
+        res = seed_data.apply_soal_pt_nusantara_digital(conn, scheme_kode)
+        db.bump_instrument_version(conn, scheme_kode)
+        db.audit(conn, user["id"], "apply_soal_preset", "scheme", scheme_kode, new_value=res)
+        conn.commit()
+        return res
+
     @app.get("/api/config/instrument")
     def get_instrument_config(scheme_kode: str = db.DEFAULT_SCHEME_KODE, ctx: tuple = Depends(auth_ctx)):
         conn, _ = ctx

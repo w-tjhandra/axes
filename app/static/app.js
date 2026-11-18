@@ -53,7 +53,17 @@ function fmtDateTime(value) {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return `${fmtDate(value)} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const dateTime = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
+  return `${dateTime.day} ${MONTHS[Number(dateTime.month) - 1]} ${dateTime.year} ${dateTime.hour}:${dateTime.minute}`;
 }
 
 function fmtPercent(value) {

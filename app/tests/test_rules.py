@@ -76,13 +76,11 @@ def test_seed_persis_tabel_5_2_dan_total_61_indikator():
         "SK-01": ["J.611000.003.02", "J.611000.004.01"],
         "SK-02": [
             "J.611000.009.02",
-            "J.611000.010.02",
             "J.611000.011.02",
         ],
         "SK-03": [
             "J.611000.009.02",
             "J.611000.011.02",
-            "J.611000.012.02",
             "J.611000.022.01",
         ],
         "SK-04": ["J.611000.006.01", "J.611000.011.02", "J.611000.012.02"],
@@ -175,6 +173,22 @@ def test_kombinasi_praktik_masuk_sk02_sk03_sk04():
     res_2 = rules.compute_result(units, subs, scores_2, "Budi (02)")
     assert res_2["outcome"] == "kompeten_sub"
     assert {"SK-02", "SK-03"} <= {s["kode"] for s in res_2["sub_fulfilled"]}
+
+    # Kasus 3: 008.02, 009.02, 011.02, 020.01 -> memenuhi SK-02
+    scores_3 = zero_scores(units)
+    for kode in ["J.611000.008.02", "J.611000.009.02", "J.611000.011.02", "J.611000.020.01"]:
+        fill_unit(scores_3, units, kode)
+    res_3 = rules.compute_result(units, subs, scores_3, "Cici (03)")
+    assert res_3["outcome"] == "kompeten_sub"
+    assert res_3["selected_sub"]["kode"] == "SK-02"
+
+    # Kasus 4: 008.02, 009.02, 011.02, 020.01, 022.01 -> memenuhi SK-02 dan SK-03
+    scores_4 = zero_scores(units)
+    for kode in ["J.611000.008.02", "J.611000.009.02", "J.611000.011.02", "J.611000.020.01", "J.611000.022.01"]:
+        fill_unit(scores_4, units, kode)
+    res_4 = rules.compute_result(units, subs, scores_4, "Dedi (04)")
+    assert res_4["outcome"] == "kompeten_sub"
+    assert {"SK-02", "SK-03"} <= {s["kode"] for s in res_4["sub_fulfilled"]}
 
 
 def test_unit_lulus_tanpa_sub_jadi_belum_kompeten():

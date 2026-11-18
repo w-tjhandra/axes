@@ -255,7 +255,6 @@ SUB_COMPETENCIES: list[tuple[str, str, int, list[str]]] = [
         2,
         [
             "J.611000.009.02",
-            "J.611000.010.02",
             "J.611000.011.02",
         ],
     ),
@@ -266,7 +265,6 @@ SUB_COMPETENCIES: list[tuple[str, str, int, list[str]]] = [
         [
             "J.611000.009.02",
             "J.611000.011.02",
-            "J.611000.012.02",
             "J.611000.022.01",
         ],
     ),

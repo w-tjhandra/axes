@@ -456,7 +456,7 @@ def _migrate_scheme_weights(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_jnt_sub_competencies(conn: sqlite3.Connection) -> None:
-    if get_config(conn, "jnt_sub_v2_migrated") == "1":
+    if get_config(conn, "jnt_sub_v3_migrated") == "1":
         return
     try:
         from . import rules
@@ -526,7 +526,7 @@ def _migrate_jnt_sub_competencies(conn: sqlite3.Connection) -> None:
                 (snap_json, stamp, a["id"]),
             )
 
-    set_config(conn, "jnt_sub_v2_migrated", "1")
+    set_config(conn, "jnt_sub_v3_migrated", "1")
     if rows:
         set_config(conn, "sheets_dirty", "1")
     conn.commit()

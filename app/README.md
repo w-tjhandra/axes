@@ -100,9 +100,9 @@ Ekspor XLSX berisi tiga sheet: `Ringkasan`, `Detail Unit`, `Sub Kompetensi`.
 Sub kompetensi:
 
 - **SK-01** — 003, 004
-- **SK-02** — 008, 009, 010, 011
-- **SK-03** — 004, 011, 012
-- **SK-04** — 006, 015, 020
+- **SK-02** — 009, 011
+- **SK-03** — 009, 011, 022
+- **SK-04** — 006, 011, 012
 - **SK-05** — 017, 018, 022
 
 Dua indikator ditandai **usulan** (`is_proposed=1`) karena teks eksplisitnya

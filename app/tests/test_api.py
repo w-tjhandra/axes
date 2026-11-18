@@ -712,10 +712,13 @@ def test_sanitasi_nama_tab_sheets():
     assert sheets.sanitize_tab_name("History") == "Sekolah_History"
 
 
-def test_format_locked_at_sheets_ke_wib():
-    assert sheets._format_locked_at("2026-11-16T04:26:37Z") == "2026-11-16 11:26:37 WIB"
-    assert sheets._format_locked_at(None) == ""
-    assert sheets._format_locked_at("timestamp-invalid") == "timestamp-invalid"
+def test_locked_at_sheets_value_is_wib_datetime_serial():
+    from datetime import datetime
+
+    expected = (datetime(2026, 11, 16, 11, 26, 37) - datetime(1899, 12, 30)).total_seconds() / 86400
+    assert sheets._locked_at_sheet_value("2026-11-16T04:26:37Z") == expected
+    assert sheets._locked_at_sheet_value(None) == ""
+    assert sheets._locked_at_sheet_value("timestamp-invalid") == "timestamp-invalid"
 
 
 def test_multi_scheme_crud_dan_assessment_lsa_pro(client):

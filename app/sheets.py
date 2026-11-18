@@ -6,7 +6,7 @@ import json
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,14 +25,17 @@ _SYNC_LOCK = threading.Lock()
 _WIB = ZoneInfo("Asia/Jakarta")
 
 
-def _format_locked_at(value: str | None) -> str:
+def _locked_at_sheet_value(value: str | None) -> float | str:
     if not value:
         return ""
     try:
         locked_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return value
-    return f"{locked_at.astimezone(_WIB).strftime('%Y-%m-%d %H:%M:%S')} WIB"
+    if locked_at.tzinfo is None:
+        locked_at = locked_at.replace(tzinfo=timezone.utc)
+    local_time = locked_at.astimezone(_WIB).replace(tzinfo=None)
+    return (local_time - datetime(1899, 12, 30)).total_seconds() / 86400
 
 
 def extract_spreadsheet_id(raw: str | None) -> str:
@@ -264,7 +267,7 @@ def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list
                 "",
                 "",
                 "",
-                _format_locked_at(assessment["locked_at"] if assessment else None),
+                _locked_at_sheet_value(assessment["locked_at"] if assessment else None),
             ]
         )
     return headers, rows, snapshot
@@ -361,7 +364,7 @@ def _rows_for_exam_school(
                 "",
                 "",
                 "",
-                _format_locked_at(enrollment["locked_at"]),
+                _locked_at_sheet_value(enrollment["locked_at"]),
             ]
         )
     return headers, rows, snapshot
@@ -423,11 +426,11 @@ def test_connection(db_path: str | os.PathLike[str] | None = None, conn=None) ->
 def _ensure_tab(service, spreadsheet_id: str, tab: str, known_tabs: dict[str, int]) -> None:
     if tab in known_tabs:
         return
-    service.spreadsheets().batchUpdate(
+    result = service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body={"requests": [{"addSheet": {"properties": {"title": tab}}}]},
     ).execute()
-    known_tabs[tab] = -1
+    known_tabs[tab] = result["replies"][0]["addSheet"]["properties"]["sheetId"]
 
 
 def sync_schools(
@@ -566,6 +569,33 @@ def sync_schools(
             service.spreadsheets().values().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"valueInputOption": "USER_ENTERED", "data": data},
+            ).execute()
+            locked_at_column = headers.index("Locked At")
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": known_tabs[tab],
+                                    "startRowIndex": 1,
+                                    "startColumnIndex": locked_at_column,
+                                    "endColumnIndex": locked_at_column + 1,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "numberFormat": {
+                                            "type": "DATE_TIME",
+                                            "pattern": "MM/dd/yyyy HH:mm:ss",
+                                        }
+                                    }
+                                },
+                                "fields": "userEnteredFormat.numberFormat",
+                            }
+                        }
+                    ]
+                },
             ).execute()
             synced_schools += 1
         return {

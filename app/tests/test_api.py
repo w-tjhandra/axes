@@ -712,6 +712,12 @@ def test_sanitasi_nama_tab_sheets():
     assert sheets.sanitize_tab_name("History") == "Sekolah_History"
 
 
+def test_format_locked_at_sheets_ke_wib():
+    assert sheets._format_locked_at("2026-11-16T04:26:37Z") == "2026-11-16 11:26:37 WIB"
+    assert sheets._format_locked_at(None) == ""
+    assert sheets._format_locked_at("timestamp-invalid") == "timestamp-invalid"
+
+
 def test_multi_scheme_crud_dan_assessment_lsa_pro(client):
     setup_login(client)
     res = client.get("/api/schemes")

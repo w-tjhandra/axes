@@ -6,8 +6,10 @@ import json
 import os
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 try:
     from . import db, rules
@@ -20,6 +22,17 @@ SYSTEM_TAB_NAMES = {"", "history", "ringkasan", "config", "sheet1"}
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 _SYNC_LOCK = threading.Lock()
+_WIB = ZoneInfo("Asia/Jakarta")
+
+
+def _format_locked_at(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        locked_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return f"{locked_at.astimezone(_WIB).strftime('%Y-%m-%d %H:%M:%S')} WIB"
 
 
 def extract_spreadsheet_id(raw: str | None) -> str:
@@ -251,7 +264,7 @@ def _rows_for_school(conn, school_id: int, config: dict[str, Any]) -> tuple[list
                 "",
                 "",
                 "",
-                (assessment["locked_at"] if assessment else "") or "",
+                _format_locked_at(assessment["locked_at"] if assessment else None),
             ]
         )
     return headers, rows, snapshot
@@ -348,7 +361,7 @@ def _rows_for_exam_school(
                 "",
                 "",
                 "",
-                enrollment["locked_at"] or "",
+                _format_locked_at(enrollment["locked_at"]),
             ]
         )
     return headers, rows, snapshot

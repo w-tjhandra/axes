@@ -633,74 +633,19 @@ def _render_docx(
 
 def _convert_docx_to_pdf(docx_path: Path, work_dir: Path) -> bytes:
     converter = shutil.which(os.environ.get("CERTIFICATE_CONVERTER", "libreoffice"))
-    bwrap = shutil.which("bwrap")
-    if not converter or not bwrap:
+    if not converter:
         fail(
             503,
             "certificate_converter_unavailable",
-            message="LibreOffice dan bubblewrap diperlukan untuk konversi DOCX terisolasi.",
+            message="LibreOffice diperlukan untuk konversi DOCX ke PDF.",
         )
     (work_dir / "home").mkdir(exist_ok=True, mode=0o700)
     (work_dir / "profile").mkdir(exist_ok=True, mode=0o700)
-    command = [
-        bwrap,
-        "--unshare-net",
-        "--unshare-pid",
-        "--die-with-parent",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--symlink",
-        "usr/bin",
-        "/bin",
-    ]
-    for system_path in ("/lib", "/lib64"):
-        if Path(system_path).exists():
-            command.extend(["--ro-bind", system_path, system_path])
-    command.extend(
-        [
-            "--dir",
-            "/etc",
-            "--dir",
-            "/etc/libreoffice",
-            "--dir",
-            "/etc/libreoffice/registry",
-        ]
-    )
-    for system_path in (
-        "/etc/ld.so.cache",
-        "/etc/fonts",
-        "/etc/passwd",
-        "/etc/group",
-        "/etc/localtime",
-        "/etc/nsswitch.conf",
-    ):
-        if Path(system_path).exists():
-            command.extend(["--ro-bind", system_path, system_path])
-    registry = Path("/etc/libreoffice/registry/main.xcd")
-    if registry.is_file():
-        command.extend(["--ro-bind", str(registry), str(registry)])
-    command.extend(
-        [
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--tmpfs",
-            "/tmp",
-            "--dir",
-            "/work",
-            "--bind",
-            str(work_dir),
-            "/work",
-            "--setenv",
-            "HOME",
-            "/work/home",
-            "--chdir",
-            "/work",
-            "--",
+
+    def _run_direct() -> subprocess.CompletedProcess[str]:
+        direct_cmd = [
             converter,
-            "-env:UserInstallation=file:///work/profile",
+            f"-env:UserInstallation=file://{(work_dir / 'profile').as_posix()}",
             "--headless",
             "--nologo",
             "--nodefault",
@@ -709,24 +654,116 @@ def _convert_docx_to_pdf(docx_path: Path, work_dir: Path) -> bytes:
             "--convert-to",
             "pdf",
             "--outdir",
-            "/work",
-            "/work/source.docx",
+            str(work_dir),
+            str(docx_path),
         ]
-    )
-    try:
-        process = subprocess.run(
-            command,
+        return subprocess.run(
+            direct_cmd,
             capture_output=True,
             text=True,
             timeout=45,
             check=False,
             env={"PATH": os.environ.get("PATH", ""), "HOME": str(work_dir / "home")},
         )
-    except subprocess.TimeoutExpired:
-        fail(504, "certificate_conversion_timeout")
-    except OSError as exc:
-        fail(503, "certificate_conversion_failed", message=str(exc)[:200])
+
+    bwrap = shutil.which("bwrap")
+    process: subprocess.CompletedProcess[str] | None = None
+    if bwrap:
+        command = [
+            bwrap,
+            "--unshare-net",
+            "--unshare-pid",
+            "--die-with-parent",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--symlink",
+            "usr/bin",
+            "/bin",
+        ]
+        for system_path in ("/lib", "/lib64"):
+            if Path(system_path).exists():
+                command.extend(["--ro-bind", system_path, system_path])
+        command.extend(
+            [
+                "--dir",
+                "/etc",
+                "--dir",
+                "/etc/libreoffice",
+                "--dir",
+                "/etc/libreoffice/registry",
+            ]
+        )
+        for system_path in (
+            "/etc/ld.so.cache",
+            "/etc/fonts",
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/localtime",
+            "/etc/nsswitch.conf",
+        ):
+            if Path(system_path).exists():
+                command.extend(["--ro-bind", system_path, system_path])
+        registry = Path("/etc/libreoffice/registry/main.xcd")
+        if registry.is_file():
+            command.extend(["--ro-bind", str(registry), str(registry)])
+        command.extend(
+            [
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
+                "--dir",
+                "/work",
+                "--bind",
+                str(work_dir),
+                "/work",
+                "--setenv",
+                "HOME",
+                "/work/home",
+                "--chdir",
+                "/work",
+                "--",
+                converter,
+                "-env:UserInstallation=file:///work/profile",
+                "--headless",
+                "--nologo",
+                "--nodefault",
+                "--nolockcheck",
+                "--norestore",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                "/work",
+                "/work/source.docx",
+            ]
+        )
+        try:
+            process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+                env={"PATH": os.environ.get("PATH", ""), "HOME": str(work_dir / "home")},
+            )
+        except subprocess.TimeoutExpired:
+            fail(504, "certificate_conversion_timeout")
+        except OSError:
+            process = None
+
     pdf_path = work_dir / "source.pdf"
+    # Fallback ke LibreOffice langsung bila bwrap gagal membuat namespace (mis. AppArmor Ubuntu 24.04 / VPS container)
+    if process is None or (process.returncode != 0 and not pdf_path.is_file()):
+        try:
+            process = _run_direct()
+        except subprocess.TimeoutExpired:
+            fail(504, "certificate_conversion_timeout")
+        except OSError as exc:
+            fail(503, "certificate_conversion_failed", message=str(exc)[:200])
+
     if process.returncode != 0 or not pdf_path.is_file():
         fail(502, "certificate_conversion_failed", message=(process.stderr or process.stdout or "")[-500:])
     if pdf_path.stat().st_size > MAX_PDF_BYTES:
@@ -1555,9 +1592,9 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
     def certificate_status(ctx: tuple = Depends(auth_ctx)):
         converter = os.environ.get("CERTIFICATE_CONVERTER", "libreoffice")
         return {
-            "ready": bool(shutil.which(converter) and shutil.which("bwrap")),
+            "ready": bool(shutil.which(converter)),
             "converter": Path(shutil.which(converter) or converter).name,
-            "isolation": "bubblewrap-network-and-pid-namespace" if shutil.which("bwrap") else None,
+            "isolation": "bubblewrap-with-direct-fallback" if shutil.which("bwrap") else "direct-tempdir",
             "max_template_bytes": MAX_DOCX_BYTES,
             "max_pdf_bytes": MAX_PDF_BYTES,
         }
@@ -1573,9 +1610,7 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         if (exam_id is None) == (scheme_kode is None):
             fail(400, "template_scope_required", message="Pilih satu cakupan: ujian atau skema.")
         if exam_id is not None:
-            exam = _resolve_exam(conn, exam_id)
-            if exam["status"] == "archived":
-                fail(409, "exam_archived")
+            _resolve_exam(conn, exam_id)
         if scheme_kode and conn.execute("SELECT 1 FROM scheme WHERE kode=?", (scheme_kode,)).fetchone() is None:
             fail(404, "scheme_not_found")
         filename = Path(file.filename or "").name
@@ -1675,9 +1710,7 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         if not row["previewed_at"]:
             fail(409, "certificate_template_preview_required")
         if row["exam_id"] is not None:
-            exam = _resolve_exam(conn, row["exam_id"])
-            if exam["status"] == "archived":
-                fail(409, "exam_archived")
+            _resolve_exam(conn, row["exam_id"])
         conn.execute(
             """UPDATE certificate_template SET active=0
                WHERE exam_id IS ? AND scheme_kode IS ?""",
@@ -1710,8 +1743,6 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         enrollment = _enrollment_row(conn, enrollment_id)
         if enrollment["status"] != "enrolled":
             fail(409, "enrollment_not_active")
-        if enrollment["exam_status"] == "archived":
-            fail(409, "exam_archived")
         if enrollment["assessment_id"] is None or enrollment["assessment_status"] != "locked":
             fail(409, "assessment_not_final")
         result = json.loads(enrollment["result_json"]) if enrollment["result_json"] else {}
@@ -1740,8 +1771,8 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
                 (enrollment["exam_year"], enrollment["scheme_kode"]),
             ).fetchone()[0] + 1
             current_status = conn.execute("SELECT status FROM exam WHERE id=?", (enrollment["exam_id"],)).fetchone()
-            if current_status is None or current_status["status"] == "archived":
-                fail(409, "exam_archived")
+            if current_status is None:
+                fail(404, "exam_not_found")
             number = f"AA-{enrollment['exam_year']}-{enrollment['scheme_kode']}-{sequence:05d}"
             examiner_name = _clean(body.examiner_name)
             if examiner_name:
@@ -1822,9 +1853,7 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         exam_id: int, body: BulkCertificateGenerate, ctx: tuple = Depends(auth_ctx)
     ):
         conn, user = ctx
-        exam = _resolve_exam(conn, exam_id)
-        if exam["status"] == "archived":
-            fail(409, "exam_archived")
+        _resolve_exam(conn, exam_id)
 
         clauses = ["ee.exam_id = ?", "ee.status = 'enrolled'"]
         params: list[Any] = [exam_id]

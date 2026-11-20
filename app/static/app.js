@@ -1328,7 +1328,7 @@ async function renderExamDetail(examId, archiveRoute = false) {
       <div class="card-head">
         <div><div class="card-title">Roster ujian</div><div class="card-sub">${fmtNumber(roster.meta.total)} pendaftaran · identitas pada tabel adalah snapshot saat pendaftaran.</div></div>
         <div class="toolbar">
-          ${!readOnly ? '<button class="btn small" id="bulk-issue-certificates" type="button">Terbitkan sertifikat 1 kelas</button>' : ''}
+          <button class="btn small" id="bulk-issue-certificates" type="button">Terbitkan sertifikat 1 kelas</button>
           <button class="btn small ghost" id="download-certificates-zip" type="button">Unduh ZIP sertifikat</button>
           ${!readOnly && ['draft', 'active'].includes(exam.status) ? '<button class="btn small" id="import-roster" type="button">Impor CSV</button><input id="roster-file" type="file" accept=".csv,text/csv" class="hidden"><button class="btn small primary" id="add-enrollment" type="button">Tambah asesi</button>' : ''}
         </div>
@@ -1356,7 +1356,7 @@ async function renderExamDetail(examId, archiveRoute = false) {
             <td>${row.result ? outcomeBadge(row.result) : `<span class="badge">${esc(assessmentLabel)}</span>`}</td>
             <td class="actions">
               ${row.assessment_id ? `<a class="btn small" href="#/assessment/${row.assessment_id}">${row.assessment_status === 'locked' ? 'Hasil' : 'Lanjutkan'}</a>` : (!readOnly && exam.status === 'active' && row.status === 'enrolled' ? `<button class="btn small primary" type="button" data-assess-enrollment="${row.id}">Mulai</button>` : '')}
-              ${row.certificate_id ? `<a class="btn small ghost" href="/api/certificates/${row.certificate_id}/download">PDF sertifikat</a>` : (canCert && !readOnly ? `<button class="btn small ghost" type="button" data-issue-certificate="${row.id}">Buat sertifikat</button>` : '')}
+              ${row.certificate_id ? `<a class="btn small ghost" href="/api/certificates/${row.certificate_id}/download">PDF sertifikat</a>` : (canCert ? `<button class="btn small ghost" type="button" data-issue-certificate="${row.id}">Buat sertifikat</button>` : '')}
               ${!readOnly && !row.assessment_id && row.status === 'enrolled' && ['draft', 'active'].includes(exam.status) ? `<button class="btn small ghost" type="button" data-withdraw-enrollment="${row.id}">Keluarkan</button>` : ''}
             </td>
           </tr>`;
@@ -1368,7 +1368,7 @@ async function renderExamDetail(examId, archiveRoute = false) {
         <button class="btn small" id="roster-next" type="button" ${state.enrollmentPage + 1 >= totalPages ? 'disabled' : ''}>Berikutnya</button>
       </div>
     </div>
-    ${!readOnly ? renderTemplatePanel(exam, templates) : ''}
+    ${renderTemplatePanel(exam, templates)}
   `;
   document.querySelector('#edit-exam')?.addEventListener('click', () => openExamModal(exam));
   document.querySelector('#activate-exam')?.addEventListener('click', () => transitionExam(exam.id, 'activate'));
@@ -1415,10 +1415,10 @@ async function renderExamDetail(examId, archiveRoute = false) {
     });
   });
   document.querySelectorAll('[data-issue-certificate]').forEach((button) => {
-    button.addEventListener('click', () => issueCertificate(button.dataset.issueCertificate, examId, templates));
+    button.addEventListener('click', () => issueCertificate(button.dataset.issueCertificate, examId, readOnly));
   });
   document.querySelector('#bulk-issue-certificates')?.addEventListener('click', () => {
-    openBulkCertificateModal(exam, templates, filters);
+    openBulkCertificateModal(exam, templates, filters, readOnly);
   });
   document.querySelector('#download-certificates-zip')?.addEventListener('click', () => {
     const zipParams = new URLSearchParams();
@@ -1428,7 +1428,7 @@ async function renderExamDetail(examId, archiveRoute = false) {
     const qs = zipParams.toString();
     window.open(`/api/exams/${exam.id}/certificates/download-zip${qs ? `?${qs}` : ''}`, '_blank', 'noopener');
   });
-  if (!readOnly) bindTemplatePanel(exam, templates);
+  bindTemplatePanel(exam, templates, readOnly);
 }
 
 function renderTemplatePanel(exam, templates) {
@@ -1458,7 +1458,7 @@ function renderTemplatePanel(exam, templates) {
   </div>`;
 }
 
-function bindTemplatePanel(exam, templates) {
+function bindTemplatePanel(exam, templates, readOnly = false) {
   document.querySelector('#template-scope')?.addEventListener('change', (event) => {
     document.querySelector('#template-scheme').disabled = event.target.value !== 'scheme';
   });
@@ -1474,20 +1474,20 @@ function bindTemplatePanel(exam, templates) {
     try {
       const result = await api('/certificate-templates', { method: 'POST', body: payload });
       toast(`Template versi ${result.version} diunggah. Preview sebelum aktivasi.`, 'success');
-      await renderExamDetail(exam.id);
+      await renderExamDetail(exam.id, readOnly);
     } catch (error) {
       toast(error.message, 'error');
     }
   });
   document.querySelectorAll('[data-preview-template]').forEach((button) => {
-    button.addEventListener('click', () => previewTemplate(button.dataset.previewTemplate, exam.id));
+    button.addEventListener('click', () => previewTemplate(button.dataset.previewTemplate, exam.id, readOnly));
   });
   document.querySelectorAll('[data-activate-template]').forEach((button) => {
     button.addEventListener('click', async () => {
       try {
         await api(`/certificate-templates/${button.dataset.activateTemplate}/activate`, { method: 'POST', body: {} });
         toast('Template diaktifkan.', 'success');
-        await renderExamDetail(exam.id);
+        await renderExamDetail(exam.id, readOnly);
       } catch (error) {
         toast(error.message, 'error');
       }
@@ -1495,8 +1495,8 @@ function bindTemplatePanel(exam, templates) {
   });
 }
 
-async function previewTemplate(templateId, examId) {
-  const popup = window.open('about:blank', '_blank');
+async function previewTemplate(templateId, examId, readOnly = false) {
+  const popup = window.open('', '_blank');
   try {
     const response = await fetch(`/api/certificate-templates/${templateId}/preview`, {
       method: 'POST',
@@ -1508,15 +1508,16 @@ async function previewTemplate(templateId, examId) {
       throw new Error(data.message || data.error || `Preview gagal (${response.status}).`);
     }
     const blob = await response.blob();
-    if (popup) popup.location.href = URL.createObjectURL(blob);
+    const blobUrl = URL.createObjectURL(blob);
+    if (popup) popup.location.href = blobUrl;
     else {
       const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
+      link.href = blobUrl;
       link.download = 'preview-sertifikat.pdf';
       link.click();
     }
     toast('Preview berhasil. Template kini dapat diaktifkan.', 'success');
-    await renderExamDetail(examId);
+    await renderExamDetail(examId, readOnly);
   } catch (error) {
     popup?.close();
     toast(error.message, 'error');
@@ -1814,7 +1815,7 @@ function openRosterImportModal(exam, file) {
   });
 }
 
-async function issueCertificate(enrollmentId, examId) {
+async function issueCertificate(enrollmentId, examId, readOnly = false) {
   try {
     const templates = await api(`/certificate-templates?exam_id=${examId}`);
     const exam = await api(`/exams/${examId}`);
@@ -1855,7 +1856,7 @@ async function issueCertificate(enrollmentId, examId) {
               close();
               toast(issued.already_issued ? 'Sertifikat sebelumnya sudah diterbitkan.' : `Sertifikat ${issued.certificate_number} dibuat.`, 'success');
               window.open(`/api/certificates/${issued.id}/download`, '_blank', 'noopener');
-              await renderExamDetail(examId);
+              await renderExamDetail(examId, readOnly);
             } catch (error) {
               document.querySelector('#issue-error').textContent = error.message;
               button.disabled = false;
@@ -1869,7 +1870,7 @@ async function issueCertificate(enrollmentId, examId) {
   }
 }
 
-function openBulkCertificateModal(exam, templates, filters) {
+function openBulkCertificateModal(exam, templates, filters, readOnly = false) {
   const available = (templates || []).filter((item) =>
     item.active && (item.exam_id === exam.id || (!item.exam_id && exam.schemes.some((scheme) => scheme.kode === item.scheme_kode)))
   );
@@ -1942,7 +1943,7 @@ function openBulkCertificateModal(exam, templates, filters) {
                 ${totalReady > 0 ? `<div style="margin-top:10px"><a class="btn small primary" href="${zipUrl}" target="_blank" rel="noopener">Unduh ZIP (${fmtNumber(totalReady)} Sertifikat PDF)</a></div>` : ''}
               </div>`;
             toast(`Bulk sertifikat selesai: ${summary.issued} baru dibuat, ${summary.already_issued} sudah ada.`, 'success');
-            await renderExamDetail(exam.id);
+            await renderExamDetail(exam.id, readOnly);
           } catch (error) {
             resEl.classList.add('hidden');
             errEl.textContent = error.message;

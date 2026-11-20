@@ -301,3 +301,14 @@ def test_bulk_generate_sertifikat_per_kelas_dan_download_zip(tmp_path, monkeypat
             assert any("Budi" in n for n in names)
             assert all(zf.read(n).startswith(b"%PDF-") for n in names)
 
+        # Arsipkan ujian -> tetap bisa bulk generate sertifikat kelas XII TKJ 2!
+        assert client.post(f"/api/exams/{exam['id']}/close", headers=headers).status_code == 200
+        assert client.post(f"/api/exams/{exam['id']}/archive", headers=headers).status_code == 200
+        bulk_archived = client.post(
+            f"/api/exams/{exam['id']}/certificates/bulk",
+            json={"template_id": tpl["id"], "group_label": "XII TKJ 2"},
+            headers=headers,
+        )
+        assert bulk_archived.status_code == 200, bulk_archived.text
+        assert bulk_archived.json()["issued"] == 1
+

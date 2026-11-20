@@ -51,6 +51,8 @@ OPTIONAL_CERTIFICATE_FIELDS = {
     "outcome_label_en",
     "examiner_name",
     "sub_competency_name",
+    "sub_competencies_passed",
+    "qualification_detail",
     "passed_units_count",
     "passed_units_list",
     "unit_no",
@@ -918,12 +920,24 @@ def _certificate_values(
     exam_date = _clean(exam_date_override) or _format_date_range_id(enrollment["starts_on"], enrollment["ends_on"])
     issued_date = _clean(issued_date_override) or _format_date_id(date.today())
     outcome = str(result.get("outcome") or "")
-    outcome_label = str(result.get("outcome_label") or outcome)
+    outcome_label = "Kompeten" if outcome in {"kompeten_penuh", "kompeten_sub"} else str(result.get("outcome_label") or outcome)
     outcome_label_en = OUTCOME_LABELS_EN.get(outcome, outcome_label)
     predicate = str(result.get("predicate") or "")
     predicate_en = PREDICATE_LABELS_EN.get(predicate, predicate)
     selected_sub = result.get("selected_sub") or {}
     sub_name = str(selected_sub.get("judul") or selected_sub.get("kode") or "")
+    fulfilled_subs = list(result.get("sub_fulfilled") or [])
+    fulfilled_subs.sort(key=lambda s: (s.get("urutan") is None, s.get("urutan") or 0, str(s.get("kode") or "")))
+    sub_titles = [str(s.get("judul") or s.get("kode") or "").strip() for s in fulfilled_subs]
+    sub_titles = [t for t in sub_titles if t]
+    sub_competencies_passed = ", ".join(sub_titles) if sub_titles else sub_name
+    scheme_name = str(enrollment["scheme_name"] or "")
+    if outcome == "kompeten_penuh":
+        qualification_detail = f"Skema {scheme_name}"
+    elif sub_competencies_passed:
+        qualification_detail = f"Sub Kompetensi {sub_competencies_passed}"
+    else:
+        qualification_detail = f"Skema {scheme_name}"
     passed_units = _extract_passed_units(result)
 
     values: dict[str, str] = {
@@ -934,12 +948,14 @@ def _certificate_values(
         "exam_title": str(enrollment["exam_title"] or ""),
         "exam_year": str(enrollment["exam_year"] or date.today().year),
         "exam_date": exam_date,
-        "scheme_name": str(enrollment["scheme_name"] or ""),
+        "scheme_name": scheme_name,
         "outcome_label": outcome_label,
         "outcome_label_en": outcome_label_en,
         "predicate": predicate,
         "predicate_en": predicate_en,
         "sub_competency_name": sub_name,
+        "sub_competencies_passed": sub_competencies_passed,
+        "qualification_detail": qualification_detail,
         "examiner_name": str(examiner_name or ""),
         "certificate_number": str(number or ""),
         "issued_date": issued_date,
@@ -1737,11 +1753,13 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
                 "exam_year": str(date.today().year),
                 "exam_date": _format_date_id(date.today()),
                 "scheme_name": "Junior Network Technician",
-                "outcome_label": "Kompeten Penuh",
+                "outcome_label": "Kompeten",
                 "outcome_label_en": "Fully Competent",
                 "predicate": "Sangat Mahir",
                 "predicate_en": "Highly Proficient",
                 "sub_competency_name": "Teknisi Konfigurasi Jaringan",
+                "sub_competencies_passed": "Perancang Jaringan Muda, Teknisi Instalasi Jaringan, Teknisi Konfigurasi Jaringan",
+                "qualification_detail": "Sub Kompetensi Perancang Jaringan Muda, Teknisi Instalasi Jaringan, Teknisi Konfigurasi Jaringan",
                 "examiner_name": default_examiner,
                 "certificate_number": "CONTOH-00001",
                 "issued_date": _format_date_id(date.today()),

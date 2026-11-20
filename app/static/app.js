@@ -1443,7 +1443,7 @@ function renderTemplatePanel(exam, templates) {
       </form>
       <p class="hint">
         <strong>Halaman depan (wajib):</strong> {{participant_name}}, {{participant_number}}, {{school_name}}, {{exam_title}}, {{exam_year}}, {{scheme_name}}, {{outcome_label}}, {{certificate_number}}, {{issued_date}}.<br>
-        <strong>Opsional (halaman depan &amp; belakang 2 halaman):</strong> {{outcome_label_en}}, {{predicate}}, {{predicate_en}}, {{exam_date}}, {{participant_class}}, {{examiner_name}}, {{sub_competency_name}}, serta tabel unit lulus {{unit_1_code}} &amp; {{unit_1_title}} s.d. {{unit_N_code}} &amp; {{unit_N_title}} (atau baris dinamis {{unit_no}}, {{unit_code}}, {{unit_title}} — jumlah baris tabel otomatis menyesuaikan unit yang kompeten).
+        <strong>Opsional (halaman depan &amp; belakang 2 halaman):</strong> {{qualification_detail}}, {{sub_competencies_passed}}, {{outcome_label_en}}, {{predicate}}, {{predicate_en}}, {{exam_date}}, {{participant_class}}, {{examiner_name}}, {{sub_competency_name}}, serta tabel unit lulus {{unit_1_code}} &amp; {{unit_1_title}} s.d. {{unit_N_code}} &amp; {{unit_N_title}} (baris tabel otomatis menyesuaikan unit yang kompeten).
       </p>
       ${templates.length ? `<div class="table-wrap"><table><thead><tr><th>Nama / versi</th><th>Cakupan</th><th>Status</th><th>Placeholder</th><th>Aksi</th></tr></thead><tbody>
         ${templates.map((item) => `<tr>

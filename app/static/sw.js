@@ -1,10 +1,10 @@
 /* Service worker: app shell offline-first, API network-first. */
-const CACHE_NAME = 'ukk-jnt-v20';
+const CACHE_NAME = 'ukk-jnt-v22';
 const APP_SHELL = [
   '/',
   '/index.html',
   '/app.css?v=19',
-  '/app.js?v=20',
+  '/app.js?v=22',
   '/favicon.svg?v=19',
   '/manifest.webmanifest?v=19',
 ];

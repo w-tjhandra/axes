@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import io
@@ -41,6 +42,35 @@ REQUIRED_CERTIFICATE_FIELDS = {
     "outcome_label",
     "certificate_number",
     "issued_date",
+}
+OPTIONAL_CERTIFICATE_FIELDS = {
+    "participant_class",
+    "exam_date",
+    "predicate",
+    "predicate_en",
+    "outcome_label_en",
+    "examiner_name",
+    "sub_competency_name",
+    "passed_units_count",
+    "passed_units_list",
+    "unit_no",
+    "unit_code",
+    "unit_title",
+    "unit_percent",
+}
+UNIT_PLACEHOLDER_PATTERN = re.compile(r"^unit_([1-9]\d?)_(no|code|title|percent)$")
+LOOP_UNIT_PLACEHOLDERS = {"unit_no", "unit_code", "unit_title", "unit_percent"}
+OUTCOME_LABELS_EN = {
+    "kompeten_penuh": "Fully Competent",
+    "kompeten_sub": "Competent in Sub-Competency",
+    "kompeten_unit": "Competent in Unit",
+    "belum_kompeten": "Not Yet Competent",
+}
+PREDICATE_LABELS_EN = {
+    "Sangat Mahir": "Highly Proficient",
+    "Mahir": "Proficient",
+    "Cakap": "Competent",
+    "Tidak Memenuhi": "Not Met",
 }
 PLACEHOLDER_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -90,6 +120,16 @@ class EnrollmentPatch(BaseModel):
 
 class CertificateGenerate(BaseModel):
     template_id: int | None = None
+    reissue: bool = False
+    examiner_name: str | None = None
+
+
+class BulkCertificateGenerate(BaseModel):
+    template_id: int | None = None
+    school_id: int | None = None
+    scheme_kode: str | None = None
+    group_label: str | None = None
+    examiner_name: str | None = None
     reissue: bool = False
 
 
@@ -142,6 +182,19 @@ def _exam_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
            WHERE ee.exam_id = ? AND a.status = 'in_progress'""",
         (row["id"],),
     ).fetchone()[0]
+    raw_groups = conn.execute(
+        """SELECT DISTINCT group_label, snapshot_class
+           FROM exam_enrollment
+           WHERE exam_id = ? AND status = 'enrolled'""",
+        (row["id"],),
+    ).fetchall()
+    result["groups"] = sorted(
+        {
+            _clean(g["group_label"] or g["snapshot_class"])
+            for g in raw_groups
+            if _clean(g["group_label"] or g["snapshot_class"])
+        }
+    )
     return result
 
 
@@ -336,6 +389,129 @@ def _certificate_dir(db_path: Path) -> Path:
     return target
 
 
+def _is_allowed_placeholder(name: str) -> bool:
+    return (
+        name in REQUIRED_CERTIFICATE_FIELDS
+        or name in OPTIONAL_CERTIFICATE_FIELDS
+        or bool(UNIT_PLACEHOLDER_PATTERN.match(name))
+    )
+
+
+def _extract_passed_units(result: dict[str, Any]) -> list[dict[str, str]]:
+    unit_results = result.get("unit_results") or []
+    passed = [u for u in unit_results if u.get("passed")]
+    passed.sort(key=lambda u: (u.get("urutan") is None, u.get("urutan") or 0, str(u.get("kode") or "")))
+    return [
+        {
+            "no": str(idx),
+            "code": str(u.get("kode") or ""),
+            "title": str(u.get("judul") or ""),
+            "percent": (
+                f"{u['percent']:.2f}%"
+                if isinstance(u.get("percent"), (int, float))
+                else str(u.get("percent") or "")
+            ),
+        }
+        for idx, u in enumerate(passed, start=1)
+    ]
+
+
+def _row_placeholders(tr: ET.Element) -> list[str]:
+    found: list[str] = []
+    for paragraph in tr.iter(f"{{{W_NS}}}p"):
+        combined = "".join(node.text or "" for node in paragraph.iter(f"{{{W_NS}}}t"))
+        found.extend(PLACEHOLDER_PATTERN.findall(combined))
+    return found
+
+
+def _update_static_row_number(tr: ET.Element, old_index: int, new_index: int) -> None:
+    cells = [child for child in list(tr) if child.tag == f"{{{W_NS}}}tc"]
+    if not cells:
+        return
+    pattern = re.compile(rf"(\s*){old_index}(\.?)(\s*)")
+    for paragraph in cells[0].iter(f"{{{W_NS}}}p"):
+        nodes = list(paragraph.iter(f"{{{W_NS}}}t"))
+        if not nodes:
+            continue
+        combined = "".join(node.text or "" for node in nodes)
+        match = pattern.fullmatch(combined)
+        if match:
+            nodes[0].text = f"{match.group(1)}{new_index}{match.group(2)}{match.group(3)}"
+            for extra in nodes[1:]:
+                extra.text = ""
+            return
+
+
+def _process_unit_tables(
+    root: ET.Element,
+    values: dict[str, str],
+    passed_units: list[dict[str, str]],
+) -> None:
+    for tbl in root.iter(f"{{{W_NS}}}tbl"):
+        direct_rows = [child for child in list(tbl) if child.tag == f"{{{W_NS}}}tr"]
+        if not direct_rows:
+            continue
+
+        # Pattern B: single dynamic loop row using {{unit_no}}, {{unit_code}}, {{unit_title}}, {{unit_percent}}
+        loop_rows = [
+            tr for tr in direct_rows if any(p in LOOP_UNIT_PLACEHOLDERS for p in _row_placeholders(tr))
+        ]
+        if loop_rows:
+            for tr in loop_rows:
+                insert_idx = list(tbl).index(tr)
+                tbl.remove(tr)
+                for offset, unit in enumerate(passed_units):
+                    cloned = copy.deepcopy(tr)
+                    row_vals = {
+                        **values,
+                        "unit_no": unit["no"],
+                        "unit_code": unit["code"],
+                        "unit_title": unit["title"],
+                        "unit_percent": unit["percent"],
+                    }
+                    for paragraph in cloned.iter(f"{{{W_NS}}}p"):
+                        _replace_paragraph_placeholders(paragraph, row_vals)
+                    tbl.insert(insert_idx + offset, cloned)
+            continue
+
+        # Pattern A: indexed unit rows using {{unit_1_code}}, {{unit_1_title}}, ..., {{unit_K_code}}
+        indexed_rows: list[tuple[int, ET.Element]] = []
+        for tr in direct_rows:
+            indices = [
+                int(match.group(1))
+                for p in _row_placeholders(tr)
+                if (match := UNIT_PLACEHOLDER_PATTERN.match(p)) is not None
+            ]
+            if indices:
+                indexed_rows.append((min(indices), tr))
+        if not indexed_rows:
+            continue
+
+        unit_count = len(passed_units)
+        max_template_idx, proto_tr = max(indexed_rows, key=lambda item: item[0])
+
+        if unit_count > max_template_idx:
+            insert_pos = list(tbl).index(proto_tr) + 1
+            for extra_offset, unit_idx in enumerate(range(max_template_idx + 1, unit_count + 1)):
+                unit = passed_units[unit_idx - 1]
+                cloned = copy.deepcopy(proto_tr)
+                _update_static_row_number(cloned, max_template_idx, unit_idx)
+                row_vals = {
+                    **values,
+                    f"unit_{max_template_idx}_no": unit["no"],
+                    f"unit_{max_template_idx}_code": unit["code"],
+                    f"unit_{max_template_idx}_title": unit["title"],
+                    f"unit_{max_template_idx}_percent": unit["percent"],
+                }
+                for paragraph in cloned.iter(f"{{{W_NS}}}p"):
+                    _replace_paragraph_placeholders(paragraph, row_vals)
+                tbl.insert(insert_pos + extra_offset, cloned)
+
+        for idx, tr in indexed_rows:
+            if idx > unit_count:
+                tbl.remove(tr)
+
+
 def _validate_docx(raw: bytes) -> tuple[list[str], bytes]:
     if not raw or len(raw) > MAX_DOCX_BYTES:
         fail(413 if len(raw) > MAX_DOCX_BYTES else 400, "template_size_invalid", max_bytes=MAX_DOCX_BYTES)
@@ -379,7 +555,7 @@ def _validate_docx(raw: bytes) -> tuple[list[str], bytes]:
         missing = sorted(REQUIRED_CERTIFICATE_FIELDS - set(placeholders))
         if missing:
             fail(400, "required_placeholders_missing", placeholders=missing)
-        unknown = sorted(set(placeholders) - REQUIRED_CERTIFICATE_FIELDS - {"participant_class", "exam_date", "predicate"})
+        unknown = sorted(name for name in placeholders if not _is_allowed_placeholder(name))
         if unknown:
             fail(400, "unknown_placeholders", placeholders=unknown)
         return placeholders, raw
@@ -425,7 +601,12 @@ def _replace_paragraph_placeholders(paragraph: ET.Element, values: dict[str, str
             node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
 
 
-def _render_docx(raw: bytes, values: dict[str, str], output_path: Path) -> None:
+def _render_docx(
+    raw: bytes,
+    values: dict[str, str],
+    output_path: Path,
+    passed_units: list[dict[str, str]] | None = None,
+) -> None:
     sanitized = io.BytesIO()
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(sanitized, "w") as target:
@@ -439,6 +620,8 @@ def _render_docx(raw: bytes, values: dict[str, str], output_path: Path) -> None:
                     data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
                 elif info.filename.startswith("word/") and info.filename.endswith(".xml"):
                     root = ET.fromstring(data)
+                    if passed_units is not None:
+                        _process_unit_tables(root, values, passed_units)
                     for paragraph in root.iter(f"{{{W_NS}}}p"):
                         _replace_paragraph_placeholders(paragraph, values)
                     data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
@@ -610,9 +793,43 @@ def _pick_template(
     return row
 
 
-def _certificate_values(enrollment: sqlite3.Row, result: dict[str, Any], number: str) -> dict[str, str]:
+def _populate_unit_values(values: dict[str, str], passed_units: list[dict[str, str]], min_slots: int = 30) -> None:
+    total_slots = max(len(passed_units), min_slots)
+    for idx in range(1, total_slots + 1):
+        if idx <= len(passed_units):
+            unit = passed_units[idx - 1]
+            values[f"unit_{idx}_no"] = unit["no"]
+            values[f"unit_{idx}_code"] = unit["code"]
+            values[f"unit_{idx}_title"] = unit["title"]
+            values[f"unit_{idx}_percent"] = unit["percent"]
+        else:
+            values[f"unit_{idx}_no"] = ""
+            values[f"unit_{idx}_code"] = ""
+            values[f"unit_{idx}_title"] = ""
+            values[f"unit_{idx}_percent"] = ""
+    values["passed_units_count"] = str(len(passed_units))
+    values["passed_units_list"] = "\n".join(
+        f"{u['no']}. {u['code']} — {u['title']}" for u in passed_units
+    )
+
+
+def _certificate_values(
+    enrollment: sqlite3.Row,
+    result: dict[str, Any],
+    number: str,
+    examiner_name: str = "",
+) -> tuple[dict[str, str], list[dict[str, str]]]:
     exam_date = " – ".join(value for value in (enrollment["starts_on"], enrollment["ends_on"]) if value)
-    return {
+    outcome = str(result.get("outcome") or "")
+    outcome_label = str(result.get("outcome_label") or outcome)
+    outcome_label_en = OUTCOME_LABELS_EN.get(outcome, outcome_label)
+    predicate = str(result.get("predicate") or "")
+    predicate_en = PREDICATE_LABELS_EN.get(predicate, predicate)
+    selected_sub = result.get("selected_sub") or {}
+    sub_name = str(selected_sub.get("judul") or selected_sub.get("kode") or "")
+    passed_units = _extract_passed_units(result)
+
+    values: dict[str, str] = {
         "participant_name": enrollment["snapshot_name"],
         "participant_number": enrollment["snapshot_number"],
         "participant_class": enrollment["group_label"] or enrollment["snapshot_class"],
@@ -621,11 +838,17 @@ def _certificate_values(enrollment: sqlite3.Row, result: dict[str, Any], number:
         "exam_year": str(enrollment["exam_year"]),
         "exam_date": exam_date,
         "scheme_name": enrollment["scheme_name"],
-        "outcome_label": result.get("outcome_label") or result.get("outcome") or "",
-        "predicate": result.get("predicate") or "",
+        "outcome_label": outcome_label,
+        "outcome_label_en": outcome_label_en,
+        "predicate": predicate,
+        "predicate_en": predicate_en,
+        "sub_competency_name": sub_name,
+        "examiner_name": examiner_name,
         "certificate_number": number,
         "issued_date": date.today().isoformat(),
     }
+    _populate_unit_values(values, passed_units)
+    return values, passed_units
 
 
 def _safe_download_name(value: str) -> str:
@@ -1400,23 +1623,39 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         conn, user = ctx
         storage = _certificate_dir(Path(app.state.db_path))
         template, raw = _template_bytes(conn, template_id, storage)
+        default_examiner = _clean(str(db.get_config(conn, "default_examiner_name", "") or "")) or _clean(user["username"])
+        sample_units = [
+            {"no": "1", "code": "J.611000.008.02", "title": "Menyiapkan Kabel Jaringan", "percent": "100.00%"},
+            {"no": "2", "code": "J.611000.009.02", "title": "Memasang Kabel Jaringan", "percent": "100.00%"},
+            {"no": "3", "code": "J.611000.011.02", "title": "Memasang Perangkat Jaringan ke dalam Sistem Jaringan", "percent": "92.31%"},
+            {"no": "4", "code": "J.611000.020.01", "title": "Mengoptimalkan Kinerja Sistem Jaringan", "percent": "88.89%"},
+            {"no": "5", "code": "J.611000.022.01", "title": "Melakukan Backup dan Restore Konfigurasi Perangkat Jaringan", "percent": "100.00%"},
+        ]
         sample = {name: f"Contoh {name}" for name in json.loads(template["placeholders_json"])}
         sample.update(
             {
                 "participant_name": "Contoh Peserta",
                 "participant_number": "000",
+                "participant_class": "XII TKJ 1",
                 "school_name": "Contoh Sekolah",
-                "exam_title": "Contoh Ujian",
+                "exam_title": "Uji Kompetensi Keahlian",
                 "exam_year": str(date.today().year),
-                "scheme_name": "Contoh Skema",
-                "outcome_label": "Kompeten",
+                "exam_date": date.today().isoformat(),
+                "scheme_name": "Junior Network Technician",
+                "outcome_label": "Kompeten Penuh",
+                "outcome_label_en": "Fully Competent",
+                "predicate": "Sangat Mahir",
+                "predicate_en": "Highly Proficient",
+                "sub_competency_name": "Teknisi Konfigurasi Jaringan",
+                "examiner_name": default_examiner,
                 "certificate_number": "CONTOH-00001",
                 "issued_date": date.today().isoformat(),
             }
         )
+        _populate_unit_values(sample, sample_units)
         with tempfile.TemporaryDirectory(prefix="aeroassess-preview-") as directory:
             work = Path(directory)
-            _render_docx(raw, sample, work / "source.docx")
+            _render_docx(raw, sample, work / "source.docx", passed_units=sample_units)
             pdf = _convert_docx_to_pdf(work / "source.docx", work)
         conn.execute("UPDATE certificate_template SET previewed_at=? WHERE id=?", (db.utcnow(), template_id))
         db.audit(conn, user["id"], "certificate_template_preview", "certificate_template", template_id)
@@ -1504,10 +1743,15 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
             if current_status is None or current_status["status"] == "archived":
                 fail(409, "exam_archived")
             number = f"AA-{enrollment['exam_year']}-{enrollment['scheme_kode']}-{sequence:05d}"
-            values = _certificate_values(enrollment, result, number)
+            examiner_name = _clean(body.examiner_name)
+            if examiner_name:
+                db.set_config(conn, "default_examiner_name", examiner_name)
+            else:
+                examiner_name = _clean(str(db.get_config(conn, "default_examiner_name", "") or "")) or _clean(user["username"])
+            values, passed_units = _certificate_values(enrollment, result, number, examiner_name=examiner_name)
             with tempfile.TemporaryDirectory(prefix="aeroassess-certificate-") as directory:
                 work = Path(directory)
-                _render_docx(raw, values, work / "source.docx")
+                _render_docx(raw, values, work / "source.docx", passed_units=passed_units)
                 pdf = _convert_docx_to_pdf(work / "source.docx", work)
             key = f"certificate-{uuid.uuid4().hex}.pdf"
             path = storage / key
@@ -1571,4 +1815,246 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
             path,
             media_type="application/pdf",
             filename=_safe_download_name(f"{enrollment['snapshot_name']}-{row['certificate_number']}"),
+        )
+
+    @app.post("/api/exams/{exam_id}/certificates/bulk")
+    def bulk_issue_certificates(
+        exam_id: int, body: BulkCertificateGenerate, ctx: tuple = Depends(auth_ctx)
+    ):
+        conn, user = ctx
+        exam = _resolve_exam(conn, exam_id)
+        if exam["status"] == "archived":
+            fail(409, "exam_archived")
+
+        clauses = ["ee.exam_id = ?", "ee.status = 'enrolled'"]
+        params: list[Any] = [exam_id]
+        if body.school_id is not None:
+            clauses.append("ee.school_id = ?")
+            params.append(body.school_id)
+        if body.scheme_kode:
+            clauses.append("ee.scheme_kode = ?")
+            params.append(_clean(body.scheme_kode))
+        group_filter = _clean(body.group_label)
+        if group_filter:
+            clauses.append("(ee.group_label = ? OR (ee.group_label = '' AND ee.snapshot_class = ?))")
+            params.extend([group_filter, group_filter])
+
+        enrollments = conn.execute(
+            f"""SELECT ee.*, e.title AS exam_title, e.year AS exam_year, e.status AS exam_status,
+                       e.starts_on, e.ends_on,
+                       sc.nama AS scheme_name, s.nama AS school_name,
+                       a.id AS assessment_id, a.status AS assessment_status,
+                       a.locked_at, a.result_json
+                FROM exam_enrollment ee
+                JOIN exam e ON e.id = ee.exam_id
+                JOIN scheme sc ON sc.kode = ee.scheme_kode
+                JOIN school s ON s.id = ee.school_id
+                LEFT JOIN assessment a ON a.exam_enrollment_id = ee.id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY s.nama, ee.group_label, ee.snapshot_number, ee.id""",
+            params,
+        ).fetchall()
+
+        examiner_name = _clean(body.examiner_name)
+        if examiner_name:
+            db.set_config(conn, "default_examiner_name", examiner_name)
+            conn.commit()
+        else:
+            examiner_name = _clean(str(db.get_config(conn, "default_examiner_name", "") or "")) or _clean(user["username"])
+
+        storage = _certificate_dir(Path(app.state.db_path))
+        template_cache: dict[int, tuple[sqlite3.Row, bytes]] = {}
+
+        issued = 0
+        already_issued = 0
+        skipped_not_locked = 0
+        skipped_not_competent = 0
+        certificate_ids: list[int] = []
+        errors: list[dict[str, Any]] = []
+
+        for enrollment in enrollments:
+            if enrollment["assessment_id"] is None or enrollment["assessment_status"] != "locked":
+                skipped_not_locked += 1
+                continue
+            result = json.loads(enrollment["result_json"]) if enrollment["result_json"] else {}
+            if result.get("outcome") not in {"kompeten_penuh", "kompeten_sub"}:
+                skipped_not_competent += 1
+                continue
+
+            prior = conn.execute(
+                """SELECT * FROM certificate_issue
+                   WHERE enrollment_id=? AND assessment_id=? AND status='active'
+                   ORDER BY id DESC LIMIT 1""",
+                (enrollment["id"], enrollment["assessment_id"]),
+            ).fetchone()
+            if prior and not body.reissue:
+                already_issued += 1
+                certificate_ids.append(prior["id"])
+                continue
+
+            template_row = _pick_template(conn, enrollment, body.template_id)
+            if template_row["id"] not in template_cache:
+                template_cache[template_row["id"]] = _template_bytes(conn, template_row["id"], storage)
+            template, raw = template_cache[template_row["id"]]
+
+            path: Path | None = None
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                sequence = conn.execute(
+                    """SELECT COUNT(*) FROM certificate_issue ci
+                       JOIN exam_enrollment ee ON ee.id=ci.enrollment_id
+                       JOIN exam e ON e.id=ee.exam_id
+                       WHERE e.year=? AND ee.scheme_kode=?""",
+                    (enrollment["exam_year"], enrollment["scheme_kode"]),
+                ).fetchone()[0] + 1
+                number = f"AA-{enrollment['exam_year']}-{enrollment['scheme_kode']}-{sequence:05d}"
+                values, passed_units = _certificate_values(enrollment, result, number, examiner_name=examiner_name)
+                with tempfile.TemporaryDirectory(prefix="aeroassess-bulk-cert-") as directory:
+                    work = Path(directory)
+                    _render_docx(raw, values, work / "source.docx", passed_units=passed_units)
+                    pdf = _convert_docx_to_pdf(work / "source.docx", work)
+                key = f"certificate-{uuid.uuid4().hex}.pdf"
+                path = storage / key
+                now = db.utcnow()
+                path.write_bytes(pdf)
+                path.chmod(0o600)
+                if prior:
+                    conn.execute("UPDATE certificate_issue SET status='superseded' WHERE id=?", (prior["id"],))
+                cursor = conn.execute(
+                    """INSERT INTO certificate_issue
+                       (enrollment_id, assessment_id, template_id, certificate_number, storage_key,
+                        checksum, status, supersedes_id, issued_at, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+                    (
+                        enrollment["id"],
+                        enrollment["assessment_id"],
+                        template["id"],
+                        number,
+                        key,
+                        hashlib.sha256(pdf).hexdigest(),
+                        prior["id"] if prior else None,
+                        now,
+                        now,
+                    ),
+                )
+                issue_id = cursor.lastrowid
+                db.audit(
+                    conn,
+                    user["id"],
+                    "certificate_bulk_issue" if not prior else "certificate_bulk_reissue",
+                    "certificate_issue",
+                    issue_id,
+                    old_value={"superseded_id": prior["id"]} if prior else None,
+                    new_value={"enrollment_id": enrollment["id"], "certificate_number": number, "template_id": template["id"]},
+                )
+                conn.commit()
+                issued += 1
+                certificate_ids.append(issue_id)
+            except HTTPException as exc:
+                conn.rollback()
+                if path is not None:
+                    path.unlink(missing_ok=True)
+                detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+                errors.append(
+                    {
+                        "enrollment_id": enrollment["id"],
+                        "participant_number": enrollment["snapshot_number"],
+                        "participant_name": enrollment["snapshot_name"],
+                        "error": detail.get("message") or detail.get("error") or "Gagal menerbitkan sertifikat",
+                    }
+                )
+            except Exception as exc:
+                conn.rollback()
+                if path is not None:
+                    path.unlink(missing_ok=True)
+                errors.append(
+                    {
+                        "enrollment_id": enrollment["id"],
+                        "participant_number": enrollment["snapshot_number"],
+                        "participant_name": enrollment["snapshot_name"],
+                        "error": str(exc)[:200],
+                    }
+                )
+
+        return {
+            "total_matched": len(enrollments),
+            "eligible": issued + already_issued + len(errors),
+            "issued": issued,
+            "already_issued": already_issued,
+            "skipped_not_locked": skipped_not_locked,
+            "skipped_not_competent": skipped_not_competent,
+            "errors": errors,
+            "certificate_ids": certificate_ids,
+        }
+
+    @app.get("/api/exams/{exam_id}/certificates/download-zip")
+    def download_exam_certificates_zip(
+        exam_id: int,
+        school_id: int | None = None,
+        scheme_kode: str | None = None,
+        group_label: str | None = None,
+        ctx: tuple = Depends(auth_ctx),
+    ):
+        conn, user = ctx
+        exam = _resolve_exam(conn, exam_id)
+        clauses = ["ee.exam_id = ?", "ci.status = 'active'"]
+        params: list[Any] = [exam_id]
+        if school_id is not None:
+            clauses.append("ee.school_id = ?")
+            params.append(school_id)
+        if scheme_kode:
+            clauses.append("ee.scheme_kode = ?")
+            params.append(_clean(scheme_kode))
+        group_filter = _clean(group_label)
+        if group_filter:
+            clauses.append("(ee.group_label = ? OR (ee.group_label = '' AND ee.snapshot_class = ?))")
+            params.extend([group_filter, group_filter])
+
+        rows = conn.execute(
+            f"""SELECT ci.id, ci.certificate_number, ci.storage_key, ci.checksum,
+                       ee.snapshot_number, ee.snapshot_name, ee.group_label, ee.snapshot_class
+                FROM certificate_issue ci
+                JOIN exam_enrollment ee ON ee.id = ci.enrollment_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY ee.group_label, ee.snapshot_number, ee.id""",
+            params,
+        ).fetchall()
+        if not rows:
+            fail(404, "no_certificates_found", message="Belum ada sertifikat yang diterbitkan untuk filter kelas/ujian ini.")
+
+        storage = _certificate_dir(Path(app.state.db_path))
+        buf = io.BytesIO()
+        used_names: set[str] = set()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for row in rows:
+                path = (storage / row["storage_key"]).resolve()
+                if path.parent != storage or not path.is_file():
+                    continue
+                raw_pdf = path.read_bytes()
+                if hashlib.sha256(raw_pdf).hexdigest() != row["checksum"]:
+                    continue
+                fname = _safe_download_name(f"{row['snapshot_number']}_{row['snapshot_name']}-{row['certificate_number']}")
+                if fname in used_names:
+                    fname = _safe_download_name(f"{row['id']}_{fname[:-4]}")
+                used_names.add(fname)
+                archive.writestr(fname, raw_pdf)
+
+        if not used_names:
+            fail(404, "certificate_files_missing", message="Berkas PDF sertifikat tidak ditemukan di penyimpanan.")
+
+        db.audit(
+            conn,
+            user["id"],
+            "certificate_bulk_download",
+            "exam",
+            exam_id,
+            new_value={"count": len(used_names), "school_id": school_id, "scheme_kode": scheme_kode, "group_label": group_filter},
+        )
+        conn.commit()
+        zip_label = f"sertifikat-{exam['title']}" + (f"-{group_filter}" if group_filter else "")
+        zip_name = re.sub(r"[^A-Za-z0-9._-]+", "_", zip_label).strip("._")[:100] + ".zip"
+        return StreamingResponse(
+            io.BytesIO(buf.getvalue()),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
         )

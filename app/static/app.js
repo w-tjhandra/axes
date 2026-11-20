@@ -1327,10 +1327,11 @@ async function renderExamDetail(examId, archiveRoute = false) {
     <div class="card">
       <div class="card-head">
         <div><div class="card-title">Roster ujian</div><div class="card-sub">${fmtNumber(roster.meta.total)} pendaftaran · identitas pada tabel adalah snapshot saat pendaftaran.</div></div>
-        ${!readOnly && ['draft', 'active'].includes(exam.status) ? `<div class="toolbar">
-          <button class="btn small" id="import-roster" type="button">Impor CSV</button><input id="roster-file" type="file" accept=".csv,text/csv" class="hidden">
-          <button class="btn small primary" id="add-enrollment" type="button">Tambah asesi</button>
-        </div>` : ''}
+        <div class="toolbar">
+          ${!readOnly ? '<button class="btn small" id="bulk-issue-certificates" type="button">Terbitkan sertifikat 1 kelas</button>' : ''}
+          <button class="btn small ghost" id="download-certificates-zip" type="button">Unduh ZIP sertifikat</button>
+          ${!readOnly && ['draft', 'active'].includes(exam.status) ? '<button class="btn small" id="import-roster" type="button">Impor CSV</button><input id="roster-file" type="file" accept=".csv,text/csv" class="hidden"><button class="btn small primary" id="add-enrollment" type="button">Tambah asesi</button>' : ''}
+        </div>
       </div>
       <div class="card-body">
         <div class="toolbar">
@@ -1416,6 +1417,17 @@ async function renderExamDetail(examId, archiveRoute = false) {
   document.querySelectorAll('[data-issue-certificate]').forEach((button) => {
     button.addEventListener('click', () => issueCertificate(button.dataset.issueCertificate, examId, templates));
   });
+  document.querySelector('#bulk-issue-certificates')?.addEventListener('click', () => {
+    openBulkCertificateModal(exam, templates, filters);
+  });
+  document.querySelector('#download-certificates-zip')?.addEventListener('click', () => {
+    const zipParams = new URLSearchParams();
+    if (filters.school_id) zipParams.set('school_id', filters.school_id);
+    if (filters.scheme_kode) zipParams.set('scheme_kode', filters.scheme_kode);
+    if (filters.group_label) zipParams.set('group_label', filters.group_label);
+    const qs = zipParams.toString();
+    window.open(`/api/exams/${exam.id}/certificates/download-zip${qs ? `?${qs}` : ''}`, '_blank', 'noopener');
+  });
   if (!readOnly) bindTemplatePanel(exam, templates);
 }
 
@@ -1429,7 +1441,10 @@ function renderTemplatePanel(exam, templates) {
         <div class="field"><label for="template-file">Template .docx (maks. 10 MiB)</label><input id="template-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required></div>
         <div class="field"><button class="btn primary" type="submit">Unggah versi</button></div>
       </form>
-      <p class="hint">Placeholder wajib: {{participant_name}}, {{participant_number}}, {{school_name}}, {{exam_title}}, {{exam_year}}, {{scheme_name}}, {{outcome_label}}, {{certificate_number}}, {{issued_date}}.</p>
+      <p class="hint">
+        <strong>Halaman depan (wajib):</strong> {{participant_name}}, {{participant_number}}, {{school_name}}, {{exam_title}}, {{exam_year}}, {{scheme_name}}, {{outcome_label}}, {{certificate_number}}, {{issued_date}}.<br>
+        <strong>Opsional (halaman depan &amp; belakang 2 halaman):</strong> {{outcome_label_en}}, {{predicate}}, {{predicate_en}}, {{exam_date}}, {{participant_class}}, {{examiner_name}}, {{sub_competency_name}}, serta tabel unit lulus {{unit_1_code}} &amp; {{unit_1_title}} s.d. {{unit_N_code}} &amp; {{unit_N_title}} (atau baris dinamis {{unit_no}}, {{unit_code}}, {{unit_title}} — jumlah baris tabel otomatis menyesuaikan unit yang kompeten).
+      </p>
       ${templates.length ? `<div class="table-wrap"><table><thead><tr><th>Nama / versi</th><th>Cakupan</th><th>Status</th><th>Placeholder</th><th>Aksi</th></tr></thead><tbody>
         ${templates.map((item) => `<tr>
           <td><div class="row-title">${esc(item.original_name)}</div><div class="row-sub">v${item.version} · ${esc(item.checksum.slice(0, 12))}…</div></td>
@@ -1810,11 +1825,13 @@ async function issueCertificate(enrollmentId, examId) {
       toast('Aktifkan template sertifikat yang sudah dipreview terlebih dahulu.', 'warning');
       return;
     }
+    const savedExaminer = localStorage.getItem('ukk-examiner-name') || state.user?.username || '';
     const formOptions = available.map((item) => `<option value="${item.id}">${esc(item.original_name)} · v${item.version}</option>`).join('');
     openModal({
       title: 'Terbitkan sertifikat internal',
-      body: `<p class="hint">Hanya hasil asesmen terkunci dengan outcome kompeten yang dapat menerima sertifikat.</p>
+      body: `<p class="hint">Hanya hasil asesmen terkunci dengan outcome kompeten yang dapat menerima sertifikat. Halaman belakang otomatis diisi unit kompetensi yang lulus.</p>
         <div class="field"><label for="issue-template">Template</label><select id="issue-template">${formOptions}</select></div>
+        <div class="field"><label for="issue-examiner">Nama Penguji (placeholder {{examiner_name}})</label><input id="issue-examiner" value="${esc(savedExaminer)}" placeholder="Contoh: Welly Chandra"></div>
         <label class="check-row"><input id="issue-reissue" type="checkbox"> Terbitkan ulang dengan nomor baru</label>
         <p id="issue-error" class="error-text" role="alert"></p>`,
       actions: [
@@ -1825,11 +1842,14 @@ async function issueCertificate(enrollmentId, examId) {
           onClick: async ({ close, button }) => {
             button.disabled = true;
             try {
+              const examinerName = document.querySelector('#issue-examiner').value.trim();
+              if (examinerName) localStorage.setItem('ukk-examiner-name', examinerName);
               const issued = await api(`/enrollments/${enrollmentId}/certificate`, {
                 method: 'POST',
                 body: {
                   template_id: Number(document.querySelector('#issue-template').value),
                   reissue: document.querySelector('#issue-reissue').checked,
+                  examiner_name: examinerName || null,
                 },
               });
               close();
@@ -1847,6 +1867,92 @@ async function issueCertificate(enrollmentId, examId) {
   } catch (error) {
     toast(error.message, 'error');
   }
+}
+
+function openBulkCertificateModal(exam, templates, filters) {
+  const available = (templates || []).filter((item) =>
+    item.active && (item.exam_id === exam.id || (!item.exam_id && exam.schemes.some((scheme) => scheme.kode === item.scheme_kode)))
+  );
+  if (!available.length) {
+    toast('Aktifkan template sertifikat yang sudah dipreview terlebih dahulu.', 'warning');
+    return;
+  }
+  const savedExaminer = localStorage.getItem('ukk-examiner-name') || state.user?.username || '';
+  const tplOptions = available.map((item) => `<option value="${item.id}">${esc(item.original_name)} · v${item.version}</option>`).join('');
+  const schoolOptions = `<option value="">Semua sekolah</option>` + (exam.schools || []).map((s) =>
+    `<option value="${s.id}" ${filters.school_id === String(s.id) ? 'selected' : ''}>${esc(s.nama)}</option>`
+  ).join('');
+  const groupOptions = `<option value="">Semua kelas / kelompok</option>` + (exam.groups || []).map((g) =>
+    `<option value="${esc(g)}" ${filters.group_label === g ? 'selected' : ''}>${esc(g)}</option>`
+  ).join('');
+
+  openModal({
+    title: 'Terbitkan sertifikat massal (1 kelas / ujian)',
+    body: `<p class="hint">Sertifikat akan dibuat otomatis untuk seluruh peserta pada filter kelas/sekolah di bawah yang asesmennya sudah <strong>terkunci</strong> dan berstatus <strong>Kompeten</strong>. Halaman belakang otomatis diisi unit kompetensi yang lulus.</p>
+      <div class="form-grid">
+        <div class="field"><label for="bulk-template">Template sertifikat</label><select id="bulk-template">${tplOptions}</select></div>
+        <div class="field"><label for="bulk-school">Sekolah</label><select id="bulk-school">${schoolOptions}</select></div>
+        <div class="field"><label for="bulk-group">Kelas / kelompok</label><select id="bulk-group">${groupOptions}</select></div>
+        <div class="field"><label for="bulk-examiner">Nama Penguji ({{examiner_name}})</label><input id="bulk-examiner" value="${esc(savedExaminer)}" placeholder="Contoh: Welly Chandra"></div>
+      </div>
+      <label class="check-row"><input id="bulk-reissue" type="checkbox"> Terbitkan ulang sertifikat yang sudah pernah dibuat</label>
+      <div id="bulk-result" class="hidden" style="margin-top:12px"></div>
+      <p id="bulk-error" class="error-text" role="alert"></p>`,
+    actions: [
+      { label: 'Tutup', className: 'ghost' },
+      {
+        label: 'Generate Semua',
+        className: 'primary',
+        onClick: async ({ button, root }) => {
+          const errEl = root.querySelector('#bulk-error');
+          const resEl = root.querySelector('#bulk-result');
+          errEl.textContent = '';
+          resEl.classList.remove('hidden');
+          resEl.innerHTML = '<p class="muted">Sedang men-generate PDF sertifikat untuk satu kelas, mohon tunggu...</p>';
+          button.disabled = true;
+          const schoolVal = root.querySelector('#bulk-school').value;
+          const groupVal = root.querySelector('#bulk-group').value;
+          const examinerName = root.querySelector('#bulk-examiner').value.trim();
+          if (examinerName) localStorage.setItem('ukk-examiner-name', examinerName);
+          try {
+            const summary = await api(`/exams/${exam.id}/certificates/bulk`, {
+              method: 'POST',
+              body: {
+                template_id: Number(root.querySelector('#bulk-template').value),
+                school_id: schoolVal ? Number(schoolVal) : null,
+                scheme_kode: filters.scheme_kode || null,
+                group_label: groupVal || null,
+                examiner_name: examinerName || null,
+                reissue: root.querySelector('#bulk-reissue').checked,
+              },
+            });
+            const zipParams = new URLSearchParams();
+            if (schoolVal) zipParams.set('school_id', schoolVal);
+            if (filters.scheme_kode) zipParams.set('scheme_kode', filters.scheme_kode);
+            if (groupVal) zipParams.set('group_label', groupVal);
+            const zipUrl = `/api/exams/${exam.id}/certificates/download-zip${zipParams.toString() ? `?${zipParams}` : ''}`;
+            const totalReady = (summary.issued || 0) + (summary.already_issued || 0);
+            resEl.innerHTML = `
+              <div class="card" style="padding:12px;background:var(--surface-2)">
+                <strong>Selesai memproses ${fmtNumber(summary.total_matched)} peserta</strong>
+                <div class="muted" style="font-size:0.86rem;margin-top:4px">
+                  Baru dibuat: <strong>${fmtNumber(summary.issued)}</strong> · Sudah ada: <strong>${fmtNumber(summary.already_issued)}</strong> · Belum terkunci: ${fmtNumber(summary.skipped_not_locked)} · Belum kompeten: ${fmtNumber(summary.skipped_not_competent)}
+                </div>
+                ${summary.errors?.length ? `<div class="error-text" style="margin-top:6px">Gagal (${summary.errors.length}): ${summary.errors.map((e) => `${esc(e.participant_name)} (${esc(e.error)})`).join('; ')}</div>` : ''}
+                ${totalReady > 0 ? `<div style="margin-top:10px"><a class="btn small primary" href="${zipUrl}" target="_blank" rel="noopener">Unduh ZIP (${fmtNumber(totalReady)} Sertifikat PDF)</a></div>` : ''}
+              </div>`;
+            toast(`Bulk sertifikat selesai: ${summary.issued} baru dibuat, ${summary.already_issued} sudah ada.`, 'success');
+            await renderExamDetail(exam.id);
+          } catch (error) {
+            resEl.classList.add('hidden');
+            errEl.textContent = error.message;
+          } finally {
+            button.disabled = false;
+          }
+        },
+      },
+    ],
+  });
 }
 
 /* ------------------------------------------------------------------ */

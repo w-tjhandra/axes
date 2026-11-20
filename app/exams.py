@@ -122,6 +122,8 @@ class CertificateGenerate(BaseModel):
     template_id: int | None = None
     reissue: bool = False
     examiner_name: str | None = None
+    exam_date: str | None = None
+    issued_date: str | None = None
 
 
 class BulkCertificateGenerate(BaseModel):
@@ -130,6 +132,8 @@ class BulkCertificateGenerate(BaseModel):
     scheme_kode: str | None = None
     group_label: str | None = None
     examiner_name: str | None = None
+    exam_date: str | None = None
+    issued_date: str | None = None
     reissue: bool = False
 
 
@@ -850,13 +854,69 @@ def _populate_unit_values(values: dict[str, str], passed_units: list[dict[str, s
     )
 
 
+BULAN_ID = (
+    "",
+    "Januari",
+    "Februari",
+    "Maret",
+    "April",
+    "Mei",
+    "Juni",
+    "Juli",
+    "Agustus",
+    "September",
+    "Oktober",
+    "November",
+    "Desember",
+)
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except ValueError:
+        return None
+
+
+def _format_date_id(value: str | date | None) -> str:
+    if isinstance(value, date):
+        return f"{value.day} {BULAN_ID[value.month]} {value.year}"
+    parsed = _parse_iso_date(value)
+    if parsed:
+        return f"{parsed.day} {BULAN_ID[parsed.month]} {parsed.year}"
+    return _clean(str(value or ""))
+
+
+def _format_date_range_id(starts_on: str | None, ends_on: str | None) -> str:
+    start_d = _parse_iso_date(starts_on)
+    end_d = _parse_iso_date(ends_on)
+    if start_d and end_d:
+        if start_d == end_d:
+            return _format_date_id(start_d)
+        if start_d.year == end_d.year and start_d.month == end_d.month:
+            return f"{start_d.day} – {end_d.day} {BULAN_ID[start_d.month]} {start_d.year}"
+        if start_d.year == end_d.year:
+            return f"{start_d.day} {BULAN_ID[start_d.month]} – {end_d.day} {BULAN_ID[end_d.month]} {start_d.year}"
+        return f"{_format_date_id(start_d)} – {_format_date_id(end_d)}"
+    if start_d:
+        return _format_date_id(start_d)
+    if end_d:
+        return _format_date_id(end_d)
+    return " – ".join(v for v in (_clean(starts_on), _clean(ends_on)) if v)
+
+
 def _certificate_values(
     enrollment: sqlite3.Row,
     result: dict[str, Any],
     number: str,
     examiner_name: str = "",
+    exam_date_override: str | None = None,
+    issued_date_override: str | None = None,
 ) -> tuple[dict[str, str], list[dict[str, str]]]:
-    exam_date = " – ".join(value for value in (enrollment["starts_on"], enrollment["ends_on"]) if value)
+    exam_date = _clean(exam_date_override) or _format_date_range_id(enrollment["starts_on"], enrollment["ends_on"])
+    issued_date = _clean(issued_date_override) or _format_date_id(date.today())
     outcome = str(result.get("outcome") or "")
     outcome_label = str(result.get("outcome_label") or outcome)
     outcome_label_en = OUTCOME_LABELS_EN.get(outcome, outcome_label)
@@ -867,22 +927,22 @@ def _certificate_values(
     passed_units = _extract_passed_units(result)
 
     values: dict[str, str] = {
-        "participant_name": enrollment["snapshot_name"],
-        "participant_number": enrollment["snapshot_number"],
-        "participant_class": enrollment["group_label"] or enrollment["snapshot_class"],
-        "school_name": enrollment["snapshot_school_name"],
-        "exam_title": enrollment["exam_title"],
-        "exam_year": str(enrollment["exam_year"]),
+        "participant_name": str(enrollment["snapshot_name"] or ""),
+        "participant_number": str(enrollment["snapshot_number"] or ""),
+        "participant_class": str(enrollment["group_label"] or enrollment["snapshot_class"] or ""),
+        "school_name": str(enrollment["snapshot_school_name"] or ""),
+        "exam_title": str(enrollment["exam_title"] or ""),
+        "exam_year": str(enrollment["exam_year"] or date.today().year),
         "exam_date": exam_date,
-        "scheme_name": enrollment["scheme_name"],
+        "scheme_name": str(enrollment["scheme_name"] or ""),
         "outcome_label": outcome_label,
         "outcome_label_en": outcome_label_en,
         "predicate": predicate,
         "predicate_en": predicate_en,
         "sub_competency_name": sub_name,
-        "examiner_name": examiner_name,
-        "certificate_number": number,
-        "issued_date": date.today().isoformat(),
+        "examiner_name": str(examiner_name or ""),
+        "certificate_number": str(number or ""),
+        "issued_date": issued_date,
     }
     _populate_unit_values(values, passed_units)
     return values, passed_units
@@ -1675,7 +1735,7 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
                 "school_name": "Contoh Sekolah",
                 "exam_title": "Uji Kompetensi Keahlian",
                 "exam_year": str(date.today().year),
-                "exam_date": date.today().isoformat(),
+                "exam_date": _format_date_id(date.today()),
                 "scheme_name": "Junior Network Technician",
                 "outcome_label": "Kompeten Penuh",
                 "outcome_label_en": "Fully Competent",
@@ -1684,7 +1744,7 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
                 "sub_competency_name": "Teknisi Konfigurasi Jaringan",
                 "examiner_name": default_examiner,
                 "certificate_number": "CONTOH-00001",
-                "issued_date": date.today().isoformat(),
+                "issued_date": _format_date_id(date.today()),
             }
         )
         _populate_unit_values(sample, sample_units)
@@ -1749,46 +1809,53 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         if result.get("outcome") not in {"kompeten_penuh", "kompeten_sub"}:
             fail(409, "certificate_requires_passing_result")
         template = _pick_template(conn, enrollment, body.template_id)
-        conn.execute("BEGIN IMMEDIATE")
-        path: Path | None = None
+        prior = conn.execute(
+            """SELECT * FROM certificate_issue
+               WHERE enrollment_id=? AND assessment_id=? AND status='active'
+               ORDER BY id DESC LIMIT 1""",
+            (enrollment_id, enrollment["assessment_id"]),
+        ).fetchone()
+        if prior and not body.reissue:
+            return {"id": prior["id"], "certificate_number": prior["certificate_number"], "issued_at": prior["issued_at"], "already_issued": True}
+
+        storage = _certificate_dir(Path(app.state.db_path))
+        template, raw = _template_bytes(conn, template["id"], storage)
+        exam_year = enrollment["exam_year"] or date.today().year
+        sequence = conn.execute(
+            """SELECT COUNT(*) FROM certificate_issue ci
+               JOIN exam_enrollment ee ON ee.id=ci.enrollment_id
+               JOIN exam e ON e.id=ee.exam_id
+               WHERE COALESCE(e.year, ?) = ? AND ee.scheme_kode=?""",
+            (exam_year, exam_year, enrollment["scheme_kode"]),
+        ).fetchone()[0] + 1
+        number = f"AA-{exam_year}-{enrollment['scheme_kode']}-{sequence:05d}"
+        examiner_name = _clean(body.examiner_name)
+        if not examiner_name:
+            examiner_name = _clean(str(db.get_config(conn, "default_examiner_name", "") or "")) or _clean(user["username"])
+        values, passed_units = _certificate_values(
+            enrollment,
+            result,
+            number,
+            examiner_name=examiner_name,
+            exam_date_override=body.exam_date,
+            issued_date_override=body.issued_date,
+        )
+        with tempfile.TemporaryDirectory(prefix="aeroassess-certificate-") as directory:
+            work = Path(directory)
+            _render_docx(raw, values, work / "source.docx", passed_units=passed_units)
+            pdf = _convert_docx_to_pdf(work / "source.docx", work)
+
+        key = f"certificate-{uuid.uuid4().hex}.pdf"
+        path = storage / key
+        now = db.utcnow()
+        path.write_bytes(pdf)
+        path.chmod(0o600)
         try:
-            prior = conn.execute(
-                """SELECT * FROM certificate_issue
-                   WHERE enrollment_id=? AND assessment_id=? AND status='active'
-                   ORDER BY id DESC LIMIT 1""",
-                (enrollment_id, enrollment["assessment_id"]),
-            ).fetchone()
-            if prior and not body.reissue:
+            if conn.in_transaction:
                 conn.commit()
-                return {"id": prior["id"], "certificate_number": prior["certificate_number"], "issued_at": prior["issued_at"], "already_issued": True}
-            storage = _certificate_dir(Path(app.state.db_path))
-            template, raw = _template_bytes(conn, template["id"], storage)
-            sequence = conn.execute(
-                """SELECT COUNT(*) FROM certificate_issue ci
-                   JOIN exam_enrollment ee ON ee.id=ci.enrollment_id
-                   JOIN exam e ON e.id=ee.exam_id
-                   WHERE e.year=? AND ee.scheme_kode=?""",
-                (enrollment["exam_year"], enrollment["scheme_kode"]),
-            ).fetchone()[0] + 1
-            current_status = conn.execute("SELECT status FROM exam WHERE id=?", (enrollment["exam_id"],)).fetchone()
-            if current_status is None:
-                fail(404, "exam_not_found")
-            number = f"AA-{enrollment['exam_year']}-{enrollment['scheme_kode']}-{sequence:05d}"
-            examiner_name = _clean(body.examiner_name)
-            if examiner_name:
+            conn.execute("BEGIN IMMEDIATE")
+            if _clean(body.examiner_name):
                 db.set_config(conn, "default_examiner_name", examiner_name)
-            else:
-                examiner_name = _clean(str(db.get_config(conn, "default_examiner_name", "") or "")) or _clean(user["username"])
-            values, passed_units = _certificate_values(enrollment, result, number, examiner_name=examiner_name)
-            with tempfile.TemporaryDirectory(prefix="aeroassess-certificate-") as directory:
-                work = Path(directory)
-                _render_docx(raw, values, work / "source.docx", passed_units=passed_units)
-                pdf = _convert_docx_to_pdf(work / "source.docx", work)
-            key = f"certificate-{uuid.uuid4().hex}.pdf"
-            path = storage / key
-            now = db.utcnow()
-            path.write_bytes(pdf)
-            path.chmod(0o600)
             if prior:
                 conn.execute("UPDATE certificate_issue SET status='superseded' WHERE id=?", (prior["id"],))
             cursor = conn.execute(
@@ -1928,16 +1995,23 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
 
             path: Path | None = None
             try:
-                conn.execute("BEGIN IMMEDIATE")
+                exam_year = enrollment["exam_year"] or date.today().year
                 sequence = conn.execute(
                     """SELECT COUNT(*) FROM certificate_issue ci
                        JOIN exam_enrollment ee ON ee.id=ci.enrollment_id
                        JOIN exam e ON e.id=ee.exam_id
-                       WHERE e.year=? AND ee.scheme_kode=?""",
-                    (enrollment["exam_year"], enrollment["scheme_kode"]),
+                       WHERE COALESCE(e.year, ?) = ? AND ee.scheme_kode=?""",
+                    (exam_year, exam_year, enrollment["scheme_kode"]),
                 ).fetchone()[0] + 1
-                number = f"AA-{enrollment['exam_year']}-{enrollment['scheme_kode']}-{sequence:05d}"
-                values, passed_units = _certificate_values(enrollment, result, number, examiner_name=examiner_name)
+                number = f"AA-{exam_year}-{enrollment['scheme_kode']}-{sequence:05d}"
+                values, passed_units = _certificate_values(
+                    enrollment,
+                    result,
+                    number,
+                    examiner_name=examiner_name,
+                    exam_date_override=body.exam_date,
+                    issued_date_override=body.issued_date,
+                )
                 with tempfile.TemporaryDirectory(prefix="aeroassess-bulk-cert-") as directory:
                     work = Path(directory)
                     _render_docx(raw, values, work / "source.docx", passed_units=passed_units)
@@ -1947,6 +2021,9 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
                 now = db.utcnow()
                 path.write_bytes(pdf)
                 path.chmod(0o600)
+                if conn.in_transaction:
+                    conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
                 if prior:
                     conn.execute("UPDATE certificate_issue SET status='superseded' WHERE id=?", (prior["id"],))
                 cursor = conn.execute(

@@ -1815,6 +1815,34 @@ function openRosterImportModal(exam, file) {
   });
 }
 
+function formatDateRangeId(startsOn, endsOn) {
+  const months = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+  const parse = (val) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(val || '').trim());
+    return m ? { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) } : null;
+  };
+  const s = parse(startsOn);
+  const e = parse(endsOn);
+  const fmt = (p) => `${p.d} ${months[p.mo]} ${p.y}`;
+  if (s && e) {
+    if (s.y === e.y && s.mo === e.mo && s.d === e.d) return fmt(s);
+    if (s.y === e.y && s.mo === e.mo) return `${s.d} – ${e.d} ${months[s.mo]} ${s.y}`;
+    if (s.y === e.y) return `${s.d} ${months[s.mo]} – ${e.d} ${months[e.mo]} ${s.y}`;
+    return `${fmt(s)} – ${fmt(e)}`;
+  }
+  if (s) return fmt(s);
+  if (e) return fmt(e);
+  return '';
+}
+
+function todayDateId() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return formatDateRangeId(`${y}-${m}-${d}`, null);
+}
+
 async function issueCertificate(enrollmentId, examId, readOnly = false) {
   try {
     const templates = await api(`/certificate-templates?exam_id=${examId}`);
@@ -1827,11 +1855,17 @@ async function issueCertificate(enrollmentId, examId, readOnly = false) {
       return;
     }
     const savedExaminer = localStorage.getItem('ukk-examiner-name') || state.user?.username || '';
+    const defaultExamDate = formatDateRangeId(exam.starts_on, exam.ends_on);
+    const defaultIssuedDate = todayDateId();
     const formOptions = available.map((item) => `<option value="${item.id}">${esc(item.original_name)} · v${item.version}</option>`).join('');
     openModal({
       title: 'Terbitkan sertifikat internal',
       body: `<p class="hint">Hanya hasil asesmen terkunci dengan outcome kompeten yang dapat menerima sertifikat. Halaman belakang otomatis diisi unit kompetensi yang lulus.</p>
         <div class="field"><label for="issue-template">Template</label><select id="issue-template">${formOptions}</select></div>
+        <div class="form-grid">
+          <div class="field"><label for="issue-exam-date">Tanggal ujian ({{exam_date}})</label><input id="issue-exam-date" value="${esc(defaultExamDate)}" placeholder="Contoh: 16 – 18 November 2026"></div>
+          <div class="field"><label for="issue-issued-date">Tanggal terbit ({{issued_date}})</label><input id="issue-issued-date" value="${esc(defaultIssuedDate)}" placeholder="Contoh: 20 November 2026"></div>
+        </div>
         <div class="field"><label for="issue-examiner">Nama Penguji (placeholder {{examiner_name}})</label><input id="issue-examiner" value="${esc(savedExaminer)}" placeholder="Contoh: Welly Chandra"></div>
         <label class="check-row"><input id="issue-reissue" type="checkbox"> Terbitkan ulang dengan nomor baru</label>
         <p id="issue-error" class="error-text" role="alert"></p>`,
@@ -1844,6 +1878,8 @@ async function issueCertificate(enrollmentId, examId, readOnly = false) {
             button.disabled = true;
             try {
               const examinerName = document.querySelector('#issue-examiner').value.trim();
+              const examDate = document.querySelector('#issue-exam-date').value.trim();
+              const issuedDate = document.querySelector('#issue-issued-date').value.trim();
               if (examinerName) localStorage.setItem('ukk-examiner-name', examinerName);
               const issued = await api(`/enrollments/${enrollmentId}/certificate`, {
                 method: 'POST',
@@ -1851,6 +1887,8 @@ async function issueCertificate(enrollmentId, examId, readOnly = false) {
                   template_id: Number(document.querySelector('#issue-template').value),
                   reissue: document.querySelector('#issue-reissue').checked,
                   examiner_name: examinerName || null,
+                  exam_date: examDate || null,
+                  issued_date: issuedDate || null,
                 },
               });
               close();
@@ -1879,6 +1917,8 @@ function openBulkCertificateModal(exam, templates, filters, readOnly = false) {
     return;
   }
   const savedExaminer = localStorage.getItem('ukk-examiner-name') || state.user?.username || '';
+  const defaultExamDate = formatDateRangeId(exam.starts_on, exam.ends_on);
+  const defaultIssuedDate = todayDateId();
   const tplOptions = available.map((item) => `<option value="${item.id}">${esc(item.original_name)} · v${item.version}</option>`).join('');
   const schoolOptions = `<option value="">Semua sekolah</option>` + (exam.schools || []).map((s) =>
     `<option value="${s.id}" ${filters.school_id === String(s.id) ? 'selected' : ''}>${esc(s.nama)}</option>`
@@ -1895,6 +1935,8 @@ function openBulkCertificateModal(exam, templates, filters, readOnly = false) {
         <div class="field"><label for="bulk-school">Sekolah</label><select id="bulk-school">${schoolOptions}</select></div>
         <div class="field"><label for="bulk-group">Kelas / kelompok</label><select id="bulk-group">${groupOptions}</select></div>
         <div class="field"><label for="bulk-examiner">Nama Penguji ({{examiner_name}})</label><input id="bulk-examiner" value="${esc(savedExaminer)}" placeholder="Contoh: Welly Chandra"></div>
+        <div class="field"><label for="bulk-exam-date">Tanggal ujian ({{exam_date}})</label><input id="bulk-exam-date" value="${esc(defaultExamDate)}" placeholder="Contoh: 16 – 18 November 2026"></div>
+        <div class="field"><label for="bulk-issued-date">Tanggal terbit ({{issued_date}})</label><input id="bulk-issued-date" value="${esc(defaultIssuedDate)}" placeholder="Contoh: 20 November 2026"></div>
       </div>
       <label class="check-row"><input id="bulk-reissue" type="checkbox"> Terbitkan ulang sertifikat yang sudah pernah dibuat</label>
       <div id="bulk-result" class="hidden" style="margin-top:12px"></div>
@@ -1914,6 +1956,8 @@ function openBulkCertificateModal(exam, templates, filters, readOnly = false) {
           const schoolVal = root.querySelector('#bulk-school').value;
           const groupVal = root.querySelector('#bulk-group').value;
           const examinerName = root.querySelector('#bulk-examiner').value.trim();
+          const examDate = root.querySelector('#bulk-exam-date').value.trim();
+          const issuedDate = root.querySelector('#bulk-issued-date').value.trim();
           if (examinerName) localStorage.setItem('ukk-examiner-name', examinerName);
           try {
             const summary = await api(`/exams/${exam.id}/certificates/bulk`, {
@@ -1924,6 +1968,8 @@ function openBulkCertificateModal(exam, templates, filters, readOnly = false) {
                 scheme_kode: filters.scheme_kode || null,
                 group_label: groupVal || null,
                 examiner_name: examinerName || null,
+                exam_date: examDate || null,
+                issued_date: issuedDate || null,
                 reissue: root.querySelector('#bulk-reissue').checked,
               },
             });

@@ -133,6 +133,7 @@ class BulkCertificateGenerate(BaseModel):
     school_id: int | None = None
     scheme_kode: str | None = None
     group_label: str | None = None
+    enrollment_ids: list[int] | None = None
     examiner_name: str | None = None
     exam_date: str | None = None
     issued_date: str | None = None
@@ -778,6 +779,60 @@ def _convert_docx_to_pdf(docx_path: Path, work_dir: Path) -> bytes:
     if not pdf.startswith(b"%PDF-"):
         fail(502, "certificate_conversion_invalid_pdf")
     return pdf
+
+
+def _convert_docx_batch_to_pdf(docx_paths: list[Path], work_dir: Path) -> dict[Path, bytes]:
+    if not docx_paths:
+        return {}
+    if len(docx_paths) == 1:
+        return {docx_paths[0]: _convert_docx_to_pdf(docx_paths[0], work_dir)}
+
+    converter = shutil.which(os.environ.get("CERTIFICATE_CONVERTER", "libreoffice"))
+    if not converter:
+        fail(
+            503,
+            "certificate_converter_unavailable",
+            message="LibreOffice diperlukan untuk konversi DOCX ke PDF.",
+        )
+    (work_dir / "home").mkdir(exist_ok=True, mode=0o700)
+    (work_dir / "profile").mkdir(exist_ok=True, mode=0o700)
+    timeout_s = max(60, 15 * len(docx_paths))
+    direct_cmd = [
+        converter,
+        f"-env:UserInstallation=file://{(work_dir / 'profile').as_posix()}",
+        "--headless",
+        "--nologo",
+        "--nodefault",
+        "--nolockcheck",
+        "--norestore",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(work_dir),
+        *[str(p) for p in docx_paths],
+    ]
+    try:
+        subprocess.run(
+            direct_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+            env={"PATH": os.environ.get("PATH", ""), "HOME": str(work_dir / "home")},
+        )
+    except subprocess.TimeoutExpired:
+        fail(504, "certificate_conversion_timeout")
+    except OSError as exc:
+        fail(503, "certificate_conversion_failed", message=str(exc)[:200])
+
+    results: dict[Path, bytes] = {}
+    for docx_path in docx_paths:
+        pdf_path = docx_path.with_suffix(".pdf")
+        if pdf_path.is_file() and pdf_path.stat().st_size <= MAX_PDF_BYTES:
+            raw_pdf = pdf_path.read_bytes()
+            if raw_pdf.startswith(b"%PDF-"):
+                results[docx_path] = raw_pdf
+    return results
 
 
 def _template_bytes(conn: sqlite3.Connection, template_id: int, storage: Path) -> tuple[sqlite3.Row, bytes]:
@@ -1952,6 +2007,11 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         if group_filter:
             clauses.append("(ee.group_label = ? OR (ee.group_label = '' AND ee.snapshot_class = ?))")
             params.extend([group_filter, group_filter])
+        if body.enrollment_ids:
+            ids = [int(eid) for eid in body.enrollment_ids]
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"ee.id IN ({placeholders})")
+            params.extend(ids)
 
         enrollments = conn.execute(
             f"""SELECT ee.*, e.title AS exam_title, e.year AS exam_year, e.status AS exam_status,
@@ -1986,6 +2046,7 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
         certificate_ids: list[int] = []
         errors: list[dict[str, Any]] = []
 
+        pending_items: list[dict[str, Any]] = []
         for enrollment in enrollments:
             if enrollment["assessment_id"] is None or enrollment["assessment_status"] != "locked":
                 skipped_not_locked += 1
@@ -2010,95 +2071,147 @@ def register_routes(app: FastAPI, auth_ctx: Any) -> None:
             if template_row["id"] not in template_cache:
                 template_cache[template_row["id"]] = _template_bytes(conn, template_row["id"], storage)
             template, raw = template_cache[template_row["id"]]
+            pending_items.append(
+                {
+                    "enrollment": enrollment,
+                    "result": result,
+                    "prior": prior,
+                    "template": template,
+                    "raw": raw,
+                }
+            )
 
-            path: Path | None = None
-            try:
-                exam_year = enrollment["exam_year"] or date.today().year
-                sequence = conn.execute(
-                    """SELECT COUNT(*) FROM certificate_issue ci
-                       JOIN exam_enrollment ee ON ee.id=ci.enrollment_id
-                       JOIN exam e ON e.id=ee.exam_id
-                       WHERE COALESCE(e.year, ?) = ? AND ee.scheme_kode=?""",
-                    (exam_year, exam_year, enrollment["scheme_kode"]),
-                ).fetchone()[0] + 1
-                number = f"AA-{exam_year}-{enrollment['scheme_kode']}-{sequence:05d}"
-                values, passed_units = _certificate_values(
-                    enrollment,
-                    result,
-                    number,
-                    examiner_name=examiner_name,
-                    exam_date_override=body.exam_date,
-                    issued_date_override=body.issued_date,
-                )
-                with tempfile.TemporaryDirectory(prefix="aeroassess-bulk-cert-") as directory:
-                    work = Path(directory)
-                    _render_docx(raw, values, work / "source.docx", passed_units=passed_units)
-                    pdf = _convert_docx_to_pdf(work / "source.docx", work)
-                key = f"certificate-{uuid.uuid4().hex}.pdf"
-                path = storage / key
-                now = db.utcnow()
-                path.write_bytes(pdf)
-                path.chmod(0o600)
-                if conn.in_transaction:
-                    conn.commit()
-                conn.execute("BEGIN IMMEDIATE")
-                if prior:
-                    conn.execute("UPDATE certificate_issue SET status='superseded' WHERE id=?", (prior["id"],))
-                cursor = conn.execute(
-                    """INSERT INTO certificate_issue
-                       (enrollment_id, assessment_id, template_id, certificate_number, storage_key,
-                        checksum, status, supersedes_id, issued_at, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
-                    (
-                        enrollment["id"],
-                        enrollment["assessment_id"],
-                        template["id"],
+        # Hitung sequence awal per (year, scheme_kode) lalu konversi PDF per batch 8 peserta agar jauh lebih cepat
+        seq_counters: dict[tuple[int, str], int] = {}
+        batch_size = 8
+        for batch_start in range(0, len(pending_items), batch_size):
+            batch = pending_items[batch_start : batch_start + batch_size]
+            with tempfile.TemporaryDirectory(prefix="aeroassess-bulk-cert-") as directory:
+                work = Path(directory)
+                prepared: list[dict[str, Any]] = []
+                for idx_in_batch, item in enumerate(batch):
+                    enrollment = item["enrollment"]
+                    exam_year = enrollment["exam_year"] or date.today().year
+                    sk = str(enrollment["scheme_kode"])
+                    seq_key = (exam_year, sk)
+                    if seq_key not in seq_counters:
+                        seq_counters[seq_key] = conn.execute(
+                            """SELECT COUNT(*) FROM certificate_issue ci
+                               JOIN exam_enrollment ee ON ee.id=ci.enrollment_id
+                               JOIN exam e ON e.id=ee.exam_id
+                               WHERE COALESCE(e.year, ?) = ? AND ee.scheme_kode=?""",
+                            (exam_year, exam_year, sk),
+                        ).fetchone()[0]
+                    seq_counters[seq_key] += 1
+                    number = f"AA-{exam_year}-{sk}-{seq_counters[seq_key]:05d}"
+                    values, passed_units = _certificate_values(
+                        enrollment,
+                        item["result"],
                         number,
-                        key,
-                        hashlib.sha256(pdf).hexdigest(),
-                        prior["id"] if prior else None,
-                        now,
-                        now,
-                    ),
-                )
-                issue_id = cursor.lastrowid
-                db.audit(
-                    conn,
-                    user["id"],
-                    "certificate_bulk_issue" if not prior else "certificate_bulk_reissue",
-                    "certificate_issue",
-                    issue_id,
-                    old_value={"superseded_id": prior["id"]} if prior else None,
-                    new_value={"enrollment_id": enrollment["id"], "certificate_number": number, "template_id": template["id"]},
-                )
-                conn.commit()
-                issued += 1
-                certificate_ids.append(issue_id)
-            except HTTPException as exc:
-                conn.rollback()
-                if path is not None:
-                    path.unlink(missing_ok=True)
-                detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
-                errors.append(
-                    {
-                        "enrollment_id": enrollment["id"],
-                        "participant_number": enrollment["snapshot_number"],
-                        "participant_name": enrollment["snapshot_name"],
-                        "error": detail.get("message") or detail.get("error") or "Gagal menerbitkan sertifikat",
-                    }
-                )
-            except Exception as exc:
-                conn.rollback()
-                if path is not None:
-                    path.unlink(missing_ok=True)
-                errors.append(
-                    {
-                        "enrollment_id": enrollment["id"],
-                        "participant_number": enrollment["snapshot_number"],
-                        "participant_name": enrollment["snapshot_name"],
-                        "error": str(exc)[:200],
-                    }
-                )
+                        examiner_name=examiner_name,
+                        exam_date_override=body.exam_date,
+                        issued_date_override=body.issued_date,
+                    )
+                    docx_path = work / f"cert_{idx_in_batch}_{enrollment['id']}.docx"
+                    try:
+                        _render_docx(item["raw"], values, docx_path, passed_units=passed_units)
+                        prepared.append({**item, "number": number, "docx_path": docx_path})
+                    except Exception as exc:
+                        errors.append(
+                            {
+                                "enrollment_id": enrollment["id"],
+                                "participant_number": enrollment["snapshot_number"],
+                                "participant_name": enrollment["snapshot_name"],
+                                "error": str(exc)[:200],
+                            }
+                        )
+
+                pdf_map: dict[Path, bytes] = {}
+                if prepared:
+                    try:
+                        pdf_map = _convert_docx_batch_to_pdf([p["docx_path"] for p in prepared], work)
+                    except Exception:
+                        pdf_map = {}
+
+                for entry in prepared:
+                    enrollment = entry["enrollment"]
+                    prior = entry["prior"]
+                    template = entry["template"]
+                    number = entry["number"]
+                    path: Path | None = None
+                    try:
+                        pdf = pdf_map.get(entry["docx_path"])
+                        if pdf is None:
+                            with tempfile.TemporaryDirectory(prefix="aeroassess-single-fallback-") as single_dir:
+                                sw = Path(single_dir)
+                                single_docx = sw / "source.docx"
+                                single_docx.write_bytes(entry["docx_path"].read_bytes())
+                                pdf = _convert_docx_to_pdf(single_docx, sw)
+                        key = f"certificate-{uuid.uuid4().hex}.pdf"
+                        path = storage / key
+                        now = db.utcnow()
+                        path.write_bytes(pdf)
+                        path.chmod(0o600)
+                        if conn.in_transaction:
+                            conn.commit()
+                        conn.execute("BEGIN IMMEDIATE")
+                        if prior:
+                            conn.execute("UPDATE certificate_issue SET status='superseded' WHERE id=?", (prior["id"],))
+                        cursor = conn.execute(
+                            """INSERT INTO certificate_issue
+                               (enrollment_id, assessment_id, template_id, certificate_number, storage_key,
+                                checksum, status, supersedes_id, issued_at, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+                            (
+                                enrollment["id"],
+                                enrollment["assessment_id"],
+                                template["id"],
+                                number,
+                                key,
+                                hashlib.sha256(pdf).hexdigest(),
+                                prior["id"] if prior else None,
+                                now,
+                                now,
+                            ),
+                        )
+                        issue_id = cursor.lastrowid
+                        db.audit(
+                            conn,
+                            user["id"],
+                            "certificate_bulk_issue" if not prior else "certificate_bulk_reissue",
+                            "certificate_issue",
+                            issue_id,
+                            old_value={"superseded_id": prior["id"]} if prior else None,
+                            new_value={"enrollment_id": enrollment["id"], "certificate_number": number, "template_id": template["id"]},
+                        )
+                        conn.commit()
+                        issued += 1
+                        certificate_ids.append(issue_id)
+                    except HTTPException as exc:
+                        conn.rollback()
+                        if path is not None:
+                            path.unlink(missing_ok=True)
+                        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+                        errors.append(
+                            {
+                                "enrollment_id": enrollment["id"],
+                                "participant_number": enrollment["snapshot_number"],
+                                "participant_name": enrollment["snapshot_name"],
+                                "error": detail.get("message") or detail.get("error") or "Gagal menerbitkan sertifikat",
+                            }
+                        )
+                    except Exception as exc:
+                        conn.rollback()
+                        if path is not None:
+                            path.unlink(missing_ok=True)
+                        errors.append(
+                            {
+                                "enrollment_id": enrollment["id"],
+                                "participant_number": enrollment["snapshot_number"],
+                                "participant_name": enrollment["snapshot_name"],
+                                "error": str(exc)[:200],
+                            }
+                        )
 
         return {
             "total_matched": len(enrollments),

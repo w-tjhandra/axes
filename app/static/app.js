@@ -1960,19 +1960,61 @@ function openBulkCertificateModal(exam, templates, filters, readOnly = false) {
           const issuedDate = root.querySelector('#bulk-issued-date').value.trim();
           if (examinerName) localStorage.setItem('ukk-examiner-name', examinerName);
           try {
-            const summary = await api(`/exams/${exam.id}/certificates/bulk`, {
-              method: 'POST',
-              body: {
-                template_id: Number(root.querySelector('#bulk-template').value),
-                school_id: schoolVal ? Number(schoolVal) : null,
-                scheme_kode: filters.scheme_kode || null,
-                group_label: groupVal || null,
-                examiner_name: examinerName || null,
-                exam_date: examDate || null,
-                issued_date: issuedDate || null,
-                reissue: root.querySelector('#bulk-reissue').checked,
-              },
-            });
+            const listParams = new URLSearchParams({ status: 'enrolled', limit: '100', offset: '0' });
+            if (schoolVal) listParams.set('school_id', schoolVal);
+            if (filters.scheme_kode) listParams.set('scheme_kode', filters.scheme_kode);
+            if (groupVal) listParams.set('group_label', groupVal);
+
+            const allMatched = [];
+            let offset = 0;
+            while (true) {
+              listParams.set('offset', String(offset));
+              const page = await api(`/exams/${exam.id}/enrollments?${listParams}`);
+              const chunk = page.data || [];
+              allMatched.push(...chunk);
+              if (allMatched.length >= (page.meta?.total || 0) || !chunk.length) break;
+              offset += chunk.length;
+            }
+
+            const totalSummary = {
+              total_matched: allMatched.length,
+              issued: 0,
+              already_issued: 0,
+              skipped_not_locked: 0,
+              skipped_not_competent: 0,
+              errors: [],
+            };
+            const batchSize = 6;
+            const totalBatches = Math.max(1, Math.ceil(allMatched.length / batchSize));
+            const templateId = Number(root.querySelector('#bulk-template').value);
+            const reissue = root.querySelector('#bulk-reissue').checked;
+
+            for (let i = 0; i < allMatched.length; i += batchSize) {
+              const batchIdx = Math.floor(i / batchSize) + 1;
+              const slice = allMatched.slice(i, i + batchSize);
+              resEl.innerHTML = `<p class="muted">Memproses batch ${batchIdx}/${totalBatches} (${Math.min(i + slice.length, allMatched.length)} / ${allMatched.length} peserta), mohon tunggu...</p>`;
+              const part = await api(`/exams/${exam.id}/certificates/bulk`, {
+                method: 'POST',
+                body: {
+                  template_id: templateId,
+                  school_id: schoolVal ? Number(schoolVal) : null,
+                  scheme_kode: filters.scheme_kode || null,
+                  group_label: groupVal || null,
+                  enrollment_ids: slice.map((item) => item.id),
+                  examiner_name: examinerName || null,
+                  exam_date: examDate || null,
+                  issued_date: issuedDate || null,
+                  reissue,
+                },
+              });
+              totalSummary.issued += part.issued || 0;
+              totalSummary.already_issued += part.already_issued || 0;
+              totalSummary.skipped_not_locked += part.skipped_not_locked || 0;
+              totalSummary.skipped_not_competent += part.skipped_not_competent || 0;
+              if (part.errors?.length) totalSummary.errors.push(...part.errors);
+            }
+
+            const summary = totalSummary;
             const zipParams = new URLSearchParams();
             if (schoolVal) zipParams.set('school_id', schoolVal);
             if (filters.scheme_kode) zipParams.set('scheme_kode', filters.scheme_kode);
